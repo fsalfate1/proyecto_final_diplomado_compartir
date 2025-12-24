@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.rag_cache.json
+.env.local
+rag_module3_exploration.ipynb
+.DS_Store
+.env # si no está ya
+.env # ya debería estar, verifica
+.env # si no existe la línea
+.env

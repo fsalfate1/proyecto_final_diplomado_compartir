@@ -1,0 +1,27 @@
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python rag_data_preparation.py
+
+
+Reproecesar todo si cambio el codigo:
+
+LOCAL:
+
+source .venv/bin/activate
+python rag_data_preparation.py
+python rag_cli.py 
+uvicorn app.server:app --reload
+
+
+
+DOCKER:
+
+docker build -t rag-mod3-app
+docker run --rm --env-file .env rag-mod3-app python rag_data_preparation.py
+docker run --rm --env-file .env -p 8080:8080 rag-mod3-app
+
+
+FLY.IO
+
+fly auth login

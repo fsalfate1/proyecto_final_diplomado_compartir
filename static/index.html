@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RAG Módulo 3</title>
+    <style>
+      :root {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #0f172a;
+        background-color: #f8fafc;
+      }
+      body {
+        margin: 0;
+        display: flex;
+        min-height: 100vh;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
+      }
+      .card {
+        width: min(650px, 100%);
+        background: white;
+        border-radius: 12px;
+        padding: 2rem;
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.1);
+      }
+      h1 {
+        margin-top: 0;
+        font-size: 1.75rem;
+      }
+      textarea {
+        width: 100%;
+        min-height: 120px;
+        resize: vertical;
+        padding: 0.75rem;
+        border-radius: 8px;
+        border: 1px solid #cbd5f5;
+        font-size: 1rem;
+        margin-bottom: 1rem;
+      }
+      button {
+        background: #2563eb;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 0.8rem 1.5rem;
+        font-size: 1rem;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      .response {
+        margin-top: 1.5rem;
+        padding: 1rem;
+        border-radius: 8px;
+        background: #eef2ff;
+        white-space: pre-wrap;
+      }
+      .error {
+        color: #b91c1c;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Consultas RAG – Módulo 3</h1>
+      <p>Haz una pregunta basada en los PDFs cargados en Qdrant.</p>
+      <textarea id="question" placeholder="Escribe tu pregunta aquí..."></textarea>
+      <button id="ask-btn">Preguntar</button>
+      <div id="status"></div>
+      <div id="answer" class="response" hidden></div>
+    </div>
+
+    <script>
+      const askBtn = document.getElementById("ask-btn");
+      const textarea = document.getElementById("question");
+      const statusLabel = document.getElementById("status");
+      const answerBox = document.getElementById("answer");
+
+      async function askQuestion() {
+        const query = textarea.value.trim();
+        if (!query) {
+          statusLabel.textContent = "Escribe una pregunta primero.";
+          statusLabel.className = "error";
+          return;
+        }
+
+        askBtn.disabled = true;
+        statusLabel.textContent = "Consultando...";
+        statusLabel.className = "";
+        answerBox.hidden = true;
+
+        try {
+          const response = await fetch("/rag/invoke", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ input: { query } }),
+          });
+          if (!response.ok) {
+            throw new Error("Error HTTP " + response.status);
+          }
+          const data = await response.json();
+          answerBox.textContent = data?.output?.answer ?? "Sin respuesta.";
+          answerBox.hidden = false;
+          statusLabel.textContent = "Listo.";
+          statusLabel.className = "";
+        } catch (error) {
+          statusLabel.textContent = "Error: " + error.message;
+          statusLabel.className = "error";
+        } finally {
+          askBtn.disabled = false;
+        }
+      }
+
+      askBtn.addEventListener("click", askQuestion);
+      textarea.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          askQuestion();
+        }
+      });
+    </script>
+  </body>
+</html>

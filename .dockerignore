@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+.rag_cache.json
+rag_module3_exploration.ipynb
+ini.txt
