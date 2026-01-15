@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Geolocalizacion + Neon</title>
+    <style>
+      :root {
+        font-family: Arial, sans-serif;
+        color: #111827;
+        background: #f3f4f6;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
+      }
+      .card {
+        background: white;
+        border-radius: 12px;
+        padding: 2rem;
+        width: min(520px, 100%);
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.08);
+      }
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.4rem;
+      }
+      label {
+        display: block;
+        margin-top: 1rem;
+        font-weight: 600;
+      }
+      input {
+        width: 100%;
+        padding: 0.6rem 0.7rem;
+        border-radius: 8px;
+        border: 1px solid #d1d5db;
+        font-size: 1rem;
+      }
+      button {
+        margin-top: 1rem;
+        padding: 0.7rem 1.1rem;
+        border: none;
+        border-radius: 8px;
+        background: #2563eb;
+        color: white;
+        font-size: 1rem;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      .result {
+        margin-top: 1rem;
+        padding: 0.8rem;
+        background: #f9fafb;
+        border-radius: 8px;
+        border: 1px solid #e5e7eb;
+        white-space: pre-wrap;
+      }
+      .error {
+        color: #b91c1c;
+        margin-top: 0.5rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Geolocalizacion + Neon</h1>
+      <p>Ingresa tu telefono y autoriza la ubicacion para guardarla en el backend.</p>
+      <label for="telefono">Telefono</label>
+      <input id="telefono" placeholder="+56912345678" />
+      <label for="mensaje">Mensaje</label>
+      <input id="mensaje" placeholder="Hola, me llamo Fabian y consulto Paracetamol" />
+      <button id="btn">Obtener ubicacion</button>
+      <div id="location" class="result" hidden></div>
+      <div id="result" class="result" hidden></div>
+      <div id="error" class="error"></div>
+    </div>
+
+    <script>
+      const btn = document.getElementById("btn");
+      const telefonoInput = document.getElementById("telefono");
+      const mensajeInput = document.getElementById("mensaje");
+      const locationBox = document.getElementById("location");
+      const result = document.getElementById("result");
+      const error = document.getElementById("error");
+
+      function setError(message) {
+        error.textContent = message;
+      }
+
+      btn.addEventListener("click", () => {
+        const telefono = telefonoInput.value.trim();
+        if (!telefono) {
+          setError("Ingresa tu telefono.");
+          return;
+        }
+        const message = mensajeInput.value.trim();
+        if (!message) {
+          setError("Escribe un mensaje.");
+          return;
+        }
+        setError("");
+        btn.disabled = true;
+
+        if (!navigator.geolocation) {
+          setError("Tu navegador no soporta geolocalizacion.");
+          btn.disabled = false;
+          return;
+        }
+
+        navigator.geolocation.getCurrentPosition(
+          async (pos) => {
+            const payload = {
+              telefono,
+              message,
+              lat: pos.coords.latitude,
+              lon: pos.coords.longitude,
+              accuracy: pos.coords.accuracy,
+            };
+            try {
+              locationBox.hidden = false;
+              locationBox.textContent =
+                `Ubicacion detectada: lat=${payload.lat.toFixed(6)}, ` +
+                `lon=${payload.lon.toFixed(6)} (±${Math.round(payload.accuracy)}m)`;
+              const response = await fetch("/api/location", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+              });
+              if (!response.ok) {
+                throw new Error("Error HTTP " + response.status);
+              }
+              const data = await response.json();
+              const farmacias = (data.farmacias || [])
+                .map((f, idx) => {
+                  return (
+                    `${idx + 1}. ${f.nombre} (${f.estado})\n` +
+                    `   ${f.direccion}, ${f.comuna}\n` +
+                    `   Distancia: ${f.distancia_km} km`
+                  );
+                })
+                .join("\n\n");
+              const farmaciasAbiertas = (data.farmacias_abiertas || [])
+                .map((f, idx) => {
+                  return (
+                    `${idx + 1}. ${f.nombre} (${f.estado})\n` +
+                    `   ${f.direccion}, ${f.comuna}\n` +
+                    `   Horario: ${f.dia} ${f.apertura}–${f.cierre}\n` +
+                    `   Distancia: ${f.distancia_km} km`
+                  );
+                })
+                .join("\n\n");
+              result.hidden = false;
+              result.textContent =
+                (data.answer || "Sin respuesta") +
+                (farmacias ? `\n\nFarmacias cercanas:\n${farmacias}` : "") +
+                (farmaciasAbiertas
+                  ? `\n\nFarmacias abiertas cercanas:\n${farmaciasAbiertas}`
+                  : "");
+            } catch (err) {
+              setError(err.message);
+            } finally {
+              btn.disabled = false;
+            }
+          },
+          (err) => {
+            setError("No se pudo obtener la ubicacion: " + err.message);
+            btn.disabled = false;
+          },
+          { enableHighAccuracy: true, timeout: 10000 }
+        );
+      });
+    </script>
+  </body>
+</html>

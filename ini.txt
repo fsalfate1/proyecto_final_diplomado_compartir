@@ -39,7 +39,7 @@ fly deploy
 actualizar git:
 
 git add .
-git commit -m "Actualización 12:41"     
+git commit -m "Actualización 26dic2025 02:38 Se modifico el sitio y evaluación de informacion no disponible"     
 git push
 
 
