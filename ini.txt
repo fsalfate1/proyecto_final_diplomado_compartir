@@ -29,6 +29,10 @@ fly auth login
 fly deploy
 
 
+git add .
+git commit -m "Primera versión"
+
+
 
 
 
