@@ -35,6 +35,11 @@ git commit -m "Primera versión"
 
 
 
+python persistencia_neon_sencillo.py
+
+ngrok http 8001 
+
+Hola
 
 
 
