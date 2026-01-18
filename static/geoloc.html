@@ -90,6 +90,11 @@
       const locationBox = document.getElementById("location");
       const result = document.getElementById("result");
       const error = document.getElementById("error");
+      const agentLabels = {
+        auxiliar: "Auxiliar de Farmacia",
+        farmaceutico: "Farmaceutico",
+        doctor: "Doctor",
+      };
 
       function setError(message) {
         error.textContent = message;
@@ -138,6 +143,7 @@
                 throw new Error("Error HTTP " + response.status);
               }
               const data = await response.json();
+              const agentName = agentLabels[data.agent] || data.agent || "Sin agente";
               const farmacias = (data.farmacias || [])
                 .map((f, idx) => {
                   return (
@@ -159,6 +165,7 @@
                 .join("\n\n");
               result.hidden = false;
               result.textContent =
+                `Agente: ${agentName}\n\n` +
                 (data.answer || "Sin respuesta") +
                 (farmacias ? `\n\nFarmacias cercanas:\n${farmacias}` : "") +
                 (farmaciasAbiertas

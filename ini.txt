@@ -1,62 +1,22 @@
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python rag_data_preparation.py
 
+construir imagen:
+docker build -t rag-farmacias:latest .
 
-Reproecesar todo si cambio el codigo:
-
-LOCAL:
-
-source .venv/bin/activate
-python rag_data_preparation.py
-python rag_cli.py 
-uvicorn app.server:app --reload
-
-
-
-DOCKER:
-
-docker build -t rag-mod3-app .
-docker run --rm --env-file .env rag-mod3-app python rag_data_preparation.py
-docker run --rm --env-file .env -p 8080:8080 rag-mod3-app
-
-
-FLY.IO
-
-fly auth login
-***SOLO SI CAMBIE LOS SECRETS: fly secrets set OPENAI_API_KEY=... QDRANT_URL=... QDRANT_API_KEY=...
-fly deploy
-
-
-git add .
-git commit -m "Primera versión"
-
-
-
-
-python persistencia_neon_sencillo.py
-
-ngrok http 8001 
-
-Hola
+ejecularlo:
+docker run --rm -p 8080:8080 --env-file .env rag-farmacias:latest
 
 
 
 
 
-actualizar git:
-
-git add .
-git commit -m "Actualización 26dic2025 02:38 Se modifico el sitio y evaluación de informacion no disponible"     
-git push
+python3 app/rag_farmacias_medicamentos.py
+ ngrok http 8001
 
 
-URL: http://0.0.0.0:8080/
-URL: http://127.0.0.1:8000/
-URL: https://rag-mod3-app.fly.dev/
+
+ fly.IO
 
 
-BBDD VECTOR: rag_mod3_pdf_exportaciones
-
-
+flyctl auth login
+flyctl secrets set OPENAI_API_KEY=... QDRANT_URL=... QDRANT_API_KEY=... DATABASE_URL=...
+flyctl deploy

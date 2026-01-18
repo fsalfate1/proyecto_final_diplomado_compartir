@@ -1,0 +1,12 @@
+
+
+
+pip install -r requirements.txt
+
+source .venv/bin/activate
+python3 app/rag_farmacias_medicamentos.py
+ngrok http 8001
+
+
+Cargar csv a QDRANT
+python3 scripts/rag_data_preparation.py

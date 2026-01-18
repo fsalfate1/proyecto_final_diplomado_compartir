@@ -8,13 +8,15 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY rag_modulo3 ./rag_modulo3
+ENV PYTHONPATH=/app/src
+
+COPY src ./src
 COPY app ./app
 COPY static ./static
-COPY rag_cli.py ./rag_cli.py
-COPY rag_data_preparation.py ./rag_data_preparation.py
+COPY data ./data
+COPY excel ./excel
 COPY pdf ./pdf
 
 EXPOSE 8080
 
-CMD ["uvicorn", "app.server:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "app.rag_farmacias_medicamentos:app", "--host", "0.0.0.0", "--port", "8080"]

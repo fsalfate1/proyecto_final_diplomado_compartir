@@ -1,13 +1,12 @@
-# fly.toml app configuration file generated for rag-mod3-app-autumn-sun-5282 on 2026-01-12T01:25:17-03:00
+# fly.toml app configuration file generated for proyecto-final-v2 on 2026-01-18T14:04:26-03:00
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'rag-mod3-app-autumn-sun-5282'
-primary_region = 'iad'
+app = 'proyecto-final-v2'
+primary_region = 'gru'
 
 [build]
-  dockerfile = 'Dockerfile'
 
 [http_service]
   internal_port = 8080
@@ -19,6 +18,5 @@ primary_region = 'iad'
 
 [[vm]]
   memory = '1gb'
-  cpu_kind = 'shared'
   cpus = 1
   memory_mb = 1024
