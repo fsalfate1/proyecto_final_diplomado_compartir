@@ -3,8 +3,7 @@ construir imagen:
 docker build -t rag-farmacias:latest .
 
 ejecularlo:
-docker run --rm -p 8080:8080 --env-file .env rag-farmacias:latest
-
+docker run --rm -p 8081:8080 --env-file .env rag-farmacias:latest
 
 
 
@@ -20,3 +19,6 @@ python3 app/rag_farmacias_medicamentos.py
 flyctl auth login
 flyctl secrets set OPENAI_API_KEY=... QDRANT_URL=... QDRANT_API_KEY=... DATABASE_URL=...
 flyctl deploy
+
+
+Hola
