@@ -13,6 +13,7 @@ from datetime import datetime, time
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -1189,10 +1190,13 @@ class LocationPayload(BaseModel):
 
 app = FastAPI(title="Neon Persistencia + Geolocalizacion")
 
+app.mount("/css", StaticFiles(directory=STATIC_DIR / "css"), name="css")
+app.mount("/js", StaticFiles(directory=STATIC_DIR / "js"), name="js")
+app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 
 @app.get("/")
 def serve_index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "geoloc.html")
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.post("/api/location")

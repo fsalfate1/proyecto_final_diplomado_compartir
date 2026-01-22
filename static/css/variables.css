@@ -1,0 +1,37 @@
+:root {
+  /* Primarios */
+  --pulso-heart: #E63946;      /* Rojo vibrante - energía vital */
+  --pulso-deep: #1D3557;       /* Azul profundo - confianza */
+  --pulso-life: #06FFA5;       /* Verde neón - vitalidad */
+
+  /* Secundarios */
+  --pulso-warm: #F77F00;       /* Naranja - advertencia suave */
+  --pulso-sky: #A8DADC;        /* Azul claro - calma */
+
+  /* Neutros */
+  --pulso-ink: #0A1128;        /* Casi negro - texto */
+  --pulso-fog: #F1FAEE;        /* Casi blanco - fondos */
+  --pulso-ash: #8D99AE;        /* Gris - secundario */
+
+  /* Estados */
+  --pulso-alert: #D62828;      /* Rojo - urgencias */
+  --pulso-success: #06FFA5;    /* Verde - confirmaciones */
+  --pulso-warning: #F77F00;    /* Naranja - advertencias */
+
+  /* Fuentes */
+  --font-heading: 'Space Grotesk', sans-serif;
+  --font-body: 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  /* Espaciado */
+  --spacing-xs: 0.5rem;
+  --spacing-sm: 1rem;
+  --spacing-md: 1.5rem;
+  --spacing-lg: 2rem;
+
+  /* Bordes */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-pill: 9999px;
+}

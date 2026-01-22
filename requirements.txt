@@ -1,15 +1,14 @@
-# Dependencias necesarias para ejecutar los notebooks de la carpeta.
 python-dotenv
-openai
-langchain
-langchain-openai
-langchain-community
-langchain-core
+openai>=1.0.0
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-community>=0.3.0
+langchain-core>=0.3.0
 langchainhub
 langchain-qdrant
 langchain-text-splitters
-langchain-experimental
-langgraph
+langchain-experimental>=0.3.0
+langgraph>=0.2.0
 langsmith
 langgraph-checkpoint-postgres
 pypdf
