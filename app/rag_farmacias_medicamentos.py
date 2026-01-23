@@ -1019,6 +1019,16 @@ def get_day_suffix() -> str:
         "friday": "viernes",
         "saturday": "sabado",
         "sunday": "domingo",
+        # Spanish support
+        "lunes": "lunes",
+        "martes": "martes",
+        "miércoles": "miercoles",
+        "miercoles": "miercoles",
+        "jueves": "jueves",
+        "viernes": "viernes",
+        "sábado": "sabado",
+        "sabado": "sabado",
+        "domingo": "domingo",
     }
     return day_map.get(now.strftime("%A").lower(), "lunes")
 
@@ -1084,15 +1094,8 @@ def get_nearest_open_pharmacies(
         now = datetime.now()
 
     def is_for_today(item: dict[str, Any]) -> bool:
-        fecha = str(item.get("fecha", "")).strip()
-        if not fecha:
-            return True
-        for fmt in ("%d-%m-%y", "%d-%m-%Y", "%Y-%m-%d"):
-            try:
-                parsed = datetime.strptime(fecha, fmt).date()
-                return parsed == now.date()
-            except ValueError:
-                continue
+        # El usuario pidio que las fechas "no prelen" (no filtren).
+        # Asumimos que si esta en el archivo del dia, es valido.
         return True
 
     def parse_time(value: str) -> time | None:
@@ -1103,34 +1106,26 @@ def get_nearest_open_pharmacies(
             return None
 
     def is_open_now(item: dict[str, Any]) -> bool:
-        def normalize_day(value: str) -> str:
-            normalized = unicodedata.normalize("NFD", value)
-            normalized = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
-            return normalized.lower().strip()
+        apertura_str = item.get("funcionamiento_hora_apertura")
+        cierre_str = item.get("funcionamiento_hora_cierre")
+        
+        # Si no hay horario, asumimos abierto para no filtrar por error de datos
+        if not apertura_str or not cierre_str:
+            return True
 
-        day_map = {
-            "monday": "lunes",
-            "tuesday": "martes",
-            "wednesday": "miercoles",
-            "thursday": "jueves",
-            "friday": "viernes",
-            "saturday": "sabado",
-            "sunday": "domingo",
-        }
-        current_day = normalize_day(day_map.get(now.strftime("%A").lower(), ""))
-        item_day = normalize_day(str(item.get("funcionamiento_dia", "")))
-        if current_day and item_day and item_day != current_day:
-            return False
-
-        apertura = parse_time(str(item.get("funcionamiento_hora_apertura", "")))
-        cierre = parse_time(str(item.get("funcionamiento_hora_cierre", "")))
+        apertura = parse_time(apertura_str)
+        cierre = parse_time(cierre_str)
+        
         if not apertura or not cierre:
-            return False
+            return True
 
-        now_time = now.time()
-        if cierre <= apertura:
-            return now_time >= apertura or now_time <= cierre
-        return apertura <= now_time <= cierre
+        current_time = now.time()
+        
+        # Manejo de horario que cruza la medianoche (ej: 22:00 a 08:00)
+        if apertura > cierre:
+            return current_time >= apertura or current_time <= cierre
+        else:
+            return apertura <= current_time <= cierre
 
     locales_by_id = {str(item.get("local_id")): item for item in locales if item.get("local_id")}
 

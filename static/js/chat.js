@@ -55,7 +55,7 @@ function init() {
   // Map / Location Events
   locationBtn.addEventListener('click', openMapModal);
   historyBtn.addEventListener('click', () => {
-    handleSend("Resumen de mi carpeta médica 📁");
+    handleSend("Resumen de mi ficha médica 📁");
   });
   closeMapBtn.addEventListener('click', closeMapModal);
   confirmLocationBtn.addEventListener('click', confirmLocation);
