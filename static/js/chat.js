@@ -9,6 +9,8 @@ const onboardingOverlay = document.getElementById('onboarding-overlay');
 const phoneInput = document.getElementById('phone-input');
 const startBtn = document.getElementById('start-btn');
 const onboardingError = document.getElementById('onboarding-error');
+const termsOverlay = document.getElementById('terms-overlay');
+const acceptTermsBtn = document.getElementById('accept-terms-btn');
 
 // Location Elements
 const locationBtn = document.getElementById('location-btn');
@@ -28,7 +30,7 @@ let mapMarker = null;
 function init() {
   const user = getStoredUser();
   if (!user) {
-    onboardingOverlay.style.display = 'flex';
+    termsOverlay.style.display = 'flex';
   } else {
     showWelcomeMessage(user.telefono);
     // Try to get location silently on startup
@@ -51,6 +53,10 @@ function init() {
 
   sendBtn.addEventListener('click', handleSend);
   startBtn.addEventListener('click', handleOnboarding);
+  acceptTermsBtn.addEventListener('click', () => {
+    termsOverlay.style.display = 'none';
+    onboardingOverlay.style.display = 'flex';
+  });
 
   // Map / Location Events
   locationBtn.addEventListener('click', openMapModal);
