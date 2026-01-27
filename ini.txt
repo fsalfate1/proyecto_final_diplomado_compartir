@@ -21,4 +21,4 @@ flyctl secrets set OPENAI_API_KEY=... QDRANT_URL=... QDRANT_API_KEY=... DATABASE
 flyctl deploy
 
 
-Hola
+Hola 1:46

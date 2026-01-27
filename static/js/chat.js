@@ -1,4 +1,4 @@
-import { sendMessage } from './api.js';
+import { sendMessage, sendMessageStream } from './api.js';
 import { getStoredUser, saveStoredUser, getCurrentLocation } from './utils.js';
 
 const chatContainer = document.getElementById('chat-container');
@@ -24,6 +24,35 @@ let isWaiting = false;
 let currentCoords = null; // { lat, lon, accuracy }
 let mapInstance = null;
 let mapMarker = null;
+let messageSeq = 0;
+let pendingPersist = null;
+
+function nextId(prefix) {
+  messageSeq += 1;
+  const rand = (globalThis.crypto && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
+  const base = `${prefix}-${Date.now()}-${messageSeq}-${rand}`;
+  return base;
+}
+
+function isHistoryQuery(text) {
+  const normalized = (text || '').toLowerCase();
+  const keywords = [
+    'historial',
+    'ficha medica',
+    'ficha médica',
+    'resumen',
+    'historia clinica',
+    'historia clínica',
+    'mi ficha',
+    'mi historial',
+    'resumen de mi ficha',
+    'resumen de mi ficha medica',
+    'resumen de mi ficha médica'
+  ];
+  return keywords.some(k => normalized.includes(k));
+}
 
 // --- Initialization ---
 
@@ -191,6 +220,13 @@ async function handleSend(overrideText = null) {
   const loadingId = showTyping();
 
   try {
+    if (isHistoryQuery(text) && pendingPersist) {
+      try {
+        await pendingPersist;
+      } catch (e) {
+        console.warn('Pending persist failed:', e);
+      }
+    }
     // 1. Ensure we have location if possible. 
     // If user hasn't set it manually (currentCoords is null), try auto one last time.
     let locToSend = currentCoords;
@@ -217,26 +253,73 @@ async function handleSend(overrideText = null) {
     };
 
     // 3. Send
-    const data = await sendMessage(payload);
-
-    // 4. Remove typing, show response
     removeMessage(loadingId);
-    
-    // Format response
-    let botText = data.answer || "Lo siento, no pude procesar tu solicitud.";
-    
-    // Append structured data if available
-    const extras = [];
-    
-    // Farmacias
-    if (data.farmacias_abiertas && data.farmacias_abiertas.length > 0) {
-        extras.push(renderPharmacies(data.farmacias_abiertas, "Farmacias Abiertas"));
-    } 
-    if (data.farmacias && data.farmacias.length > 0) {
-        extras.push(renderPharmacies(data.farmacias, "Farmacias Cercanas"));
-    }
+    const botId = addMessage('bot', '');
+    let streamedText = '';
 
-    addMessage('bot', botText, extras);
+    try {
+      const controller = new AbortController();
+      let gotFirstChunk = false;
+      const streamTimeout = setTimeout(() => {
+        if (!gotFirstChunk) controller.abort();
+      }, 15000);
+
+      await sendMessageStream(payload, {
+        signal: controller.signal,
+        onChunk: (chunk) => {
+          gotFirstChunk = true;
+          clearTimeout(streamTimeout);
+          streamedText += chunk;
+          updateMessageText(botId, streamedText);
+        },
+        onMeta: (raw) => {
+          gotFirstChunk = true;
+          clearTimeout(streamTimeout);
+          let data = null;
+          try {
+            data = JSON.parse(raw);
+          } catch (e) {
+            console.error('Meta JSON parse error:', e);
+          }
+          if (!data) return;
+
+          const extras = [];
+          if (data.farmacias_abiertas && data.farmacias_abiertas.length > 0) {
+            extras.push(renderPharmacies(data.farmacias_abiertas, "Farmacias Abiertas"));
+          }
+          if (data.farmacias && data.farmacias.length > 0) {
+            extras.push(renderPharmacies(data.farmacias, "Farmacias Cercanas"));
+          }
+          if (extras.length > 0) {
+            appendExtrasToMessage(botId, extras);
+          }
+        }
+      });
+      // Persist history in Neon using the non-stream endpoint (no UI update).
+      pendingPersist = sendMessage({ ...payload, persist_only: true })
+        .catch((e) => {
+          console.warn('Persist-only request failed:', e);
+        })
+        .finally(() => {
+          pendingPersist = null;
+        });
+      clearTimeout(streamTimeout);
+    } catch (streamErr) {
+      console.warn('Streaming failed, fallback to JSON:', streamErr);
+      const data = await sendMessage(payload);
+      const botText = data.answer || "Lo siento, no pude procesar tu solicitud.";
+      updateMessageText(botId, botText);
+      const extras = [];
+      if (data.farmacias_abiertas && data.farmacias_abiertas.length > 0) {
+        extras.push(renderPharmacies(data.farmacias_abiertas, "Farmacias Abiertas"));
+      }
+      if (data.farmacias && data.farmacias.length > 0) {
+        extras.push(renderPharmacies(data.farmacias, "Farmacias Cercanas"));
+      }
+      if (extras.length > 0) {
+        appendExtrasToMessage(botId, extras);
+      }
+    }
     
   } catch (err) {
     removeMessage(loadingId);
@@ -269,6 +352,11 @@ function renderPharmacies(list, title) {
 function addMessage(sender, text, extrasHTML = []) {
   const msgDiv = document.createElement('div');
   msgDiv.className = `message ${sender}`;
+  let id = nextId('msg');
+  while (document.getElementById(id)) {
+    id = nextId('msg');
+  }
+  msgDiv.id = id;
   
   // Format text (convert newlines to br)
   const formattedText = text.replace(/\n/g, '<br>');
@@ -282,7 +370,27 @@ function addMessage(sender, text, extrasHTML = []) {
   msgDiv.innerHTML = content;
   chatContainer.appendChild(msgDiv);
   scrollToBottom();
-  return msgDiv.id = 'msg-' + Date.now();
+  return msgDiv.id;
+}
+
+function updateMessageText(messageId, text) {
+  const el = document.getElementById(messageId);
+  if (!el) return;
+  let p = el.querySelector('p');
+  if (!p) {
+    p = document.createElement('p');
+    el.prepend(p);
+  }
+  p.dataset.raw = text;
+  p.innerHTML = text.replace(/\n/g, '<br>');
+  scrollToBottom();
+}
+
+function appendExtrasToMessage(messageId, extrasHTML = []) {
+  const el = document.getElementById(messageId);
+  if (!el || extrasHTML.length === 0) return;
+  el.insertAdjacentHTML('beforeend', extrasHTML.join(''));
+  scrollToBottom();
 }
 
 function removeMessage(id) {
@@ -291,7 +399,7 @@ function removeMessage(id) {
 }
 
 function showTyping() {
-  const id = 'typing-' + Date.now();
+  const id = nextId('typing');
   const msgDiv = document.createElement('div');
   msgDiv.id = id;
   msgDiv.className = 'message bot';

@@ -5,17 +5,20 @@ import json
 import os
 import sys
 import unicodedata
+import re
+import difflib
 from pathlib import Path
 from functools import lru_cache
-from typing import Annotated, Any, Dict, List, TypedDict
+from typing import Annotated, Any, Dict, List, TypedDict, Literal
 from datetime import datetime, time
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.prompts import ChatPromptTemplate
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph, add_messages
 from pydantic import BaseModel
@@ -43,6 +46,87 @@ doctor_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, max_tokens=500)
 PHARMA_K = 8
 USD_TO_CLP = 900
 HISTORY_ROUTER_LLM = ChatOpenAI(model="gpt-4o-mini", temperature=0, max_tokens=50)
+INTENT_ROUTER_LLM = ChatOpenAI(model="gpt-4o-mini", temperature=0, max_tokens=80)
+
+
+class IntentOutput(BaseModel):
+    intent: Literal[
+        "recomendacion_medicamento",
+        "consulta_medicamento",
+        "farmacias",
+        "salud_general",
+        "historial",
+        "saludo",
+        "despedida",
+        "fuera_de_dominio",
+    ]
+
+
+def translate_to_spanish(text: str) -> str:
+    """Traduce contenido al espanol sin alterar nombres de medicamentos, numeros o fuentes."""
+    if not text or not text.strip():
+        return text
+
+    markers = ["\n\nFuentes:", "\n\nFuentes consultadas:"]
+    body = text
+    tail = ""
+    for marker in markers:
+        if marker in text:
+            body, tail = text.split(marker, 1)
+            tail = marker + tail
+            break
+
+    system_prompt = (
+        "Traduce el texto al espanol neutro.\n"
+        "No agregues informacion ni cambies el significado.\n"
+        "Conserva nombres de medicamentos, dosis, numeros, unidades, marcas y siglas.\n"
+        "No traduzcas ni modifiques un bloque de fuentes si aparece."
+    )
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=body)]
+    translated = llm.invoke(messages).content.strip()
+    return f"{translated}{tail}"
+
+
+def translate_to_spanish_stream(text: str):
+    """Stream de traduccion al espanol, preservando nombres y fuentes."""
+    if not text or not text.strip():
+        yield text
+        return
+
+    markers = ["\n\nFuentes:", "\n\nFuentes consultadas:"]
+    body = text
+    tail = ""
+    for marker in markers:
+        if marker in text:
+            body, tail = text.split(marker, 1)
+            tail = marker + tail
+            break
+
+    system_prompt = (
+        "Traduce el texto al espanol neutro.\n"
+        "No agregues informacion ni cambies el significado.\n"
+        "Conserva nombres de medicamentos, dosis, numeros, unidades, marcas y siglas.\n"
+        "No traduzcas ni modifiques un bloque de fuentes si aparece."
+    )
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=body)]
+    acc = ""
+    for chunk in llm.stream(messages):
+        token = getattr(chunk, "content", "") or ""
+        if token:
+            acc += token
+            yield token
+    if tail:
+        yield tail
+
+
+def format_agent_prefix(agent: str | None) -> str:
+    label_map = {
+        "auxiliar": "Auxiliar",
+        "farmaceutico": "Farmaceutico",
+        "doctor": "Doctor",
+    }
+    label = label_map.get((agent or "").lower(), "Auxiliar")
+    return f"Agente {label}:\n"
 
 
 class EstadoPersonalizado(TypedDict):
@@ -62,7 +146,7 @@ class EstadoPersonalizado(TypedDict):
     last_farmacias_abiertas: list[dict[str, str]]
     last_farmacias_error: str | None
     last_farmacias_abiertas_error: str | None
-    historial_consultas: list[str]
+    historial_consultas: list[dict[str, str]]
 
 
 def update_profile(state: EstadoPersonalizado, message: str) -> tuple[str, list[str], int, int]:
@@ -127,6 +211,18 @@ def is_interest_query(message: str) -> bool:
 
 def is_health_related(message: str) -> bool:
     normalized = normalize_key(message)
+    auto_keywords = {
+        "auto",
+        "autos",
+        "carro",
+        "carros",
+        "coche",
+        "coches",
+        "vehiculo",
+        "vehiculos",
+    }
+    if any(keyword in normalized for keyword in auto_keywords):
+        return False
     keywords = [
         "farmacia",
         "farmacias",
@@ -139,6 +235,11 @@ def is_health_related(message: str) -> bool:
         "dolor",
         "duele",
         "dolencia",
+        "hongo",
+        "hongos",
+        "inflamacion",
+        "ganglio",
+        "ganglios",
         "codo",
         "sintoma",
         "sintomas",
@@ -173,6 +274,21 @@ def normalize_key(value: str) -> str:
     normalized = unicodedata.normalize("NFD", value)
     normalized = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
     return "".join(ch for ch in normalized.lower().strip() if ch.isalnum() or ch.isspace())
+
+
+def normalize_symptom_text(value: str) -> str:
+    """Normaliza texto para sintomas: baja a ascii y reduce letras repetidas."""
+    normalized = normalize_key(value)
+    normalized = re.sub(r"(.)\1{2,}", r"\1", normalized)
+    # Correcciones simples de faltas comunes tras normalizar.
+    replacements = {
+        "cuelo": "cuello",
+        "cueloo": "cuello",
+        "hombroo": "hombro",
+    }
+    for bad, good in replacements.items():
+        normalized = normalized.replace(bad, good)
+    return normalized
 
 
 def is_history_intent_llm(message: str) -> bool:
@@ -255,13 +371,27 @@ def summarize_history(messages: list[BaseMessage]) -> str:
 
 
 def classify_health_topic(message: str) -> str:
-    text = normalize_key(message)
+    text = normalize_symptom_text(message)
+    if "inflamacion" in text or "ganglio" in text or "ganglios" in text:
+        return "inflamacion"
+    if "hongo" in text or "hongos" in text:
+        return "hongos"
     if "alergia" in text:
         return "alergias"
     if "dolor" in text or "duele" in text or "dolencia" in text:
         return "dolor"
     if "fiebre" in text or "temperatura" in text:
         return "fiebre"
+    if (
+        "ojo" in text
+        or "ojos" in text
+        or "lagrimeo" in text
+        or "lagrimea" in text
+        or "picor" in text
+        or "pica" in text
+        or "irritacion" in text
+    ):
+        return "sintomas oculares"
     if "tos" in text or "resfrio" in text or "gripe" in text:
         return "sintomas respiratorios"
     if "nausea" in text or "vomito" in text or "diarrea" in text:
@@ -275,15 +405,18 @@ def classify_health_topic(message: str) -> str:
     return "consultas de salud"
 
 
-def summarize_topics(topics: list[str]) -> str:
+def summarize_topics(topics: list[dict[str, str]] | list[str]) -> str:
     if not topics:
         return "En la conversacion hemos visto temas de salud."
-    deduped = []
-    for topic in topics:
-        normalized = classify_health_topic(topic)
-        if normalized and (not deduped or deduped[-1] != normalized):
-            deduped.append(normalized)
-    recent = deduped[-5:]
+    labels = []
+    for item in topics:
+        if isinstance(item, str):
+            label = item
+        else:
+            label = item.get("tema", "")
+        if label and (not labels or labels[-1] != label):
+            labels.append(label)
+    recent = labels[-5:]
     joined = ", ".join(recent)
     return (
         "Ademas, hemos hablado de temas de salud como "
@@ -292,24 +425,92 @@ def summarize_topics(topics: list[str]) -> str:
 
 
 def extract_health_topic_detail(message: str) -> str:
-    text = normalize_key(message)
+    text = normalize_symptom_text(message)
+    if "inflamacion" in text and ("ganglio" in text or "ganglios" in text):
+        return "inflamación de ganglio"
+    if "hongo" in text or "hongos" in text:
+        if "pie" in text or "pies" in text:
+            return "hongos en los pies"
+        if "uña" in text or "unas" in text or "uñas" in text:
+            return "hongos en las uñas"
+        return "hongos"
     if "dolor" in text or "duele" in text or "dolencia" in text:
-        for zona in [
-            "codo",
-            "cabeza",
-            "pecho",
-            "espalda",
-            "garganta",
-            "estomago",
-            "abdomen",
-            "rodilla",
-            "hombro",
-            "cuello",
-        ]:
+        zonas_encontradas = []
+        zonas = [
+            # cabeza y cara
+            "cabeza", "craneo", "cuero cabelludo", "cara", "frente", "sien", "ceja",
+            "ojo", "ojos", "parpado", "parpados", "pestana", "pestanas",
+            "nariz", "fosa nasal", "fosas nasales", "boca", "labio", "labios",
+            "diente", "dientes", "encia", "encias", "lengua", "paladar", "menton",
+            "mandibula", "maxilar", "mejilla", "oreja", "oido", "oidos",
+            # cuello y garganta
+            "cuello", "nuca", "garganta", "faringe", "laringe", "amigdala", "amigdalas",
+            "tiroides", "traquea",
+            # tronco anterior
+            "pecho", "torax", "esternon", "costilla", "costillas", "mama", "mamas",
+            "axila", "axilas",
+            "abdomen", "vientre", "ombligo", "estomago",
+            "ingle",
+            # tronco posterior
+            "espalda", "columna", "lumbares", "lumbar", "dorsal", "escapula", "escapulas",
+            # miembros superiores
+            "hombro", "clavicula",
+            "brazo", "biceps", "triceps",
+            "codo", "antebrazo",
+            "muneca", "muñeca",
+            "mano", "palma", "dorso", "nudillo", "nudillos",
+            "dedo", "dedos", "pulgar", "indice", "medio", "anular", "menique",
+            # pelvis y genitales
+            "cadera", "pelvis", "pubis", "perine", "perineo",
+            "pene", "testiculo", "testiculos", "escroto",
+            "vagina", "vulva", "clitoris", "clítoris", "labios mayores", "labios menores",
+            "utero", "útero", "ovario", "ovarios",
+            # miembros inferiores
+            "pierna", "muslo",
+            "rodilla", "rotula", "rótula",
+            "pantorrilla", "gemelo", "gemelos",
+            "tobillo", "talon", "talón",
+            "pie", "planta", "empeine",
+            "dedo del pie", "dedos del pie",
+        ]
+        for zona in zonas:
             if zona in text:
-                return f"dolor de {zona}"
+                zonas_encontradas.append(zona)
+        # Fuzzy match por palabra para faltas ortograficas generales.
+        tokens = [t for t in text.split() if len(t) >= 4]
+        for token in tokens:
+            if token in zonas:
+                continue
+            match = difflib.get_close_matches(token, zonas, n=1, cutoff=0.8)
+            if match:
+                zonas_encontradas.append(match[0])
+        if zonas_encontradas:
+            if len(zonas_encontradas) == 1:
+                return f"dolor de {zonas_encontradas[0]}"
+            joined = " y ".join(sorted(set(zonas_encontradas)))
+            return f"dolor de {joined}"
         return "dolor"
-    return classify_health_topic(message)
+    topic = classify_health_topic(message)
+    if topic == "consultas de salud":
+        llm_topic = rewrite_symptom_with_llm(message)
+        return llm_topic
+    return topic
+
+
+def rewrite_symptom_with_llm(message: str) -> str:
+    """Reescribe un sintoma en frase corta y clara (sin recomendaciones)."""
+    if not message.strip():
+        return ""
+    system_prompt = (
+        "Reescribe el sintoma en una frase corta y clara en español.\n"
+        "No des recomendaciones ni medicamentos. Solo el sintoma.\n"
+        "Responde con maximo 6 palabras."
+    )
+    response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=message)])
+    text = (response.content or "").strip().lower()
+    # Limpieza simple
+    text = text.replace(".", "").replace(":", "").strip()
+    return text[:80]
 
 
 def swarm_node(state: EstadoPersonalizado) -> EstadoPersonalizado:
@@ -321,27 +522,40 @@ def swarm_node(state: EstadoPersonalizado) -> EstadoPersonalizado:
 
     nombre, intereses, sesion, preguntas = update_profile(state, user_message)
     historial_consultas = list(state.get("historial_consultas", []))
-    if user_message and is_health_related(user_message):
+    if historial_consultas and isinstance(historial_consultas[0], str):
+        historial_consultas = [
+            {"tema": item, "fecha": ""}
+            for item in historial_consultas
+            if isinstance(item, str) and item
+        ]
+    if user_message and (is_health_related(user_message) or detect_intent(user_message) == "salud_general"):
         topic = extract_health_topic_detail(user_message)
-        if not historial_consultas or historial_consultas[-1] != topic:
-            historial_consultas.append(topic)
+        if topic:
+            entry = {
+                "tema": topic,
+                "fecha": datetime.now().strftime("%d-%m-%Y %I:%M %p").lower(),
+            }
+            if not historial_consultas or historial_consultas[-1].get("tema") != topic:
+                historial_consultas.append(entry)
     wants_history = is_interest_query(user_message) or is_history_intent_llm(user_message)
     is_medicine_like = is_medicine_query(user_message) or has_vademecum_sources(user_message)
     if wants_history and not (is_pharmacy_query(user_message) or is_medicine_like):
         historial_limpio = clean_interests(intereses)
         historial = ", ".join(historial_limpio) if historial_limpio else "ninguno"
         resumen = summarize_topics(historial_consultas)
-        temas = (
-            "ninguno"
-            if not historial_consultas
-            else ", ".join(historial_consultas[-5:])
-        )
+        temas = "ninguno"
+        if historial_consultas:
+            ultimos = historial_consultas[-5:]
+            temas = ", ".join(
+                f"{item.get('tema', '')} ({item.get('fecha', '')})" for item in ultimos
+            )
         answer = (
             "Hasta ahora tengo registrado lo siguiente:\n"
             f"- Medicamentos consultados: {historial}\n"
             f"- Temas de salud: {temas}\n\n"
             "Si quieres, puedo profundizar en cualquiera de ellos o resumir con más detalle."
         )
+        answer = f"{format_agent_prefix('auxiliar')}{answer}"
         return {
             "messages": [AIMessage(content=answer)],
             "nombre_usuario": nombre,
@@ -371,6 +585,7 @@ def swarm_node(state: EstadoPersonalizado) -> EstadoPersonalizado:
                 if nombre and nombre not in intereses:
                     intereses.append(nombre)
     answer = result.get("answer", NO_KNOWLEDGE_RESPONSE)
+    answer = f"{format_agent_prefix(result.get('agent'))}{answer}"
 
     return {
         "messages": [AIMessage(content=answer)],
@@ -441,6 +656,18 @@ GREETING_KEYWORDS = {
     "hi",
 }
 
+FAREWELL_KEYWORDS = {
+    "chao",
+    "chau",
+    "adios",
+    "adiós",
+    "hasta luego",
+    "hasta pronto",
+    "nos vemos",
+    "gracias",
+    "muchas gracias",
+}
+
 
 MED_QUERY_KEYWORDS = {
     "medicamento",
@@ -466,6 +693,224 @@ MED_QUERY_KEYWORDS = {
     "vademécum",
     "disponibles en el mercado",
 }
+
+MED_RECOMMENDATION_KEYWORDS = {
+    "recomienda",
+    "recomendacion",
+    "recomendación",
+    "sugerencia",
+    "sugerir",
+    "que me recomiendas",
+    "que me recomiende",
+    "que deberia tomar",
+    "que debería tomar",
+    "que puedo tomar",
+    "que puedo tomar para",
+    "que medicamento tomo",
+    "que medicamento tomar",
+    "que remedio tomo",
+    "que remedio tomar",
+    "me puedes recomendar",
+    "receta",
+    "recetas",
+    "recetar",
+    "prescribir",
+    "prescripcion",
+    "prescripción",
+    "indicar",
+    "indicame",
+    "indícame",
+    "recomendar",
+    "recomendame",
+    "recomiéndame",
+    "recomiendas",
+    "recomiendan",
+    "sugiereme",
+    "sugiéreme",
+    "sugieres",
+    "me conviene",
+    "me convendria",
+    "me convendría",
+    "me aconsejas",
+    "aconsejame",
+    "aconsejar",
+    "dime que tomar",
+    "dime que debo tomar",
+    "dime que me tomo",
+    "que me tomo",
+    "que debo tomar",
+    "que debería tomar",
+    "que puedo tomar",
+    "que puedo tomar para",
+    "que puedo tomar si",
+    "que pastilla",
+    "que pastillas",
+    "cual pastilla",
+    "cual pastillas",
+    "cual medicamento",
+    "cual medicamente",
+    "cual remedio",
+    "cual tratamiento",
+    "dime un medicamento",
+    "dame un medicamento",
+    "dame una receta",
+    "dame una recomendacion",
+    "dame una recomendación",
+    "indica",
+    "indíca",
+    "indícame",
+    "indicacion",
+    "indicación",
+    "prescribe",
+    "prescribeme",
+    "prescríbeme",
+    "recetame",
+    "recétame",
+    "necesito un medicamento",
+    "necesito una receta",
+    "quiero una receta",
+    "quiero que me recomiendes",
+    "quiero que me recomiende",
+    "tengo sintomas que tomo",
+    "tengo sintomas que debería tomar",
+    "tengo sintomas que puedo tomar",
+    "orientame",
+    "oriéntame",
+    "orienta",
+    "orientación",
+    "orientacion",
+    "medicamente",
+    "medicamento",
+    "medicamentos",
+}
+
+MED_RECOMMENDATION_RESPONSE = (
+    "Gracias por tu consulta. No puedo entregar recomendaciones, indicaciones ni sugerencias "
+    "sobre el uso de medicamentos, ya que eso debe ser evaluado por un profesional de la "
+    "salud considerando tu situación particular. Para recibir una orientación adecuada y segura, "
+    "te recomiendo consultar con un médico, químico farmacéutico u otro profesional de la salud "
+    "autorizado.Si presentas síntomas persistentes, empeoran con el tiempo o te generan preocupación, "
+    "es importante que acudas a un centro de salud."
+)
+
+NON_MEDICAL_RESPONSE = (
+    "Gracias por tu consulta. Este asistente solo responde temas médicos, de medicamentos o de "
+    "farmacias. Si tienes otra pregunta fuera de esos temas, no podré ayudarte. Si necesitas "
+    "orientación de salud, consulta a un profesional."
+)
+
+FAREWELL_RESPONSE = (
+    "Gracias por tu consulta. Si necesitas algo más, aquí estaré."
+)
+
+
+def is_med_recommendation_query(message: str) -> bool:
+    normalized = message.lower()
+    if any(keyword in normalized for keyword in MED_RECOMMENDATION_KEYWORDS):
+        return True
+    # Regla adicional: si menciona medicamento/remedio/pastilla + verbos de tomar/recomendar/recetar/indicar.
+    meds_terms = {"medicamento", "medicamentos", "medicamente", "remedio", "remedios", "pastilla", "pastillas"}
+    verbs = {
+        "tomar",
+        "tomo",
+        "tomaria",
+        "tomaría",
+        "recetar",
+        "receta",
+        "prescribir",
+        "prescribe",
+        "indicar",
+        "indica",
+        "recomendar",
+        "recomienda",
+        "sugerir",
+        "sugiere",
+        "orientar",
+        "orienta",
+        "orientame",
+        "oriéntame",
+    }
+    if any(term in normalized for term in meds_terms) and any(verb in normalized for verb in verbs):
+        return True
+    return False
+
+
+@lru_cache(maxsize=1)
+def get_intent_router():
+    system_prompt = (
+        "Clasifica la intencion del usuario en una de estas etiquetas estrictas:\n"
+        "- recomendacion_medicamento (pide recomendar/recetar/indicar que tomar)\n"
+        "- consulta_medicamento (pide informacion sobre un medicamento)\n"
+        "- farmacias (busca farmacias cercanas/de turno)\n"
+        "- salud_general (sintomas o preguntas de salud sin pedir medicamento)\n"
+        "- historial (ficha medica, historial, resumen)\n"
+        "- saludo (saludos)\n"
+        "- despedida (despedidas o agradecimientos)\n"
+        "- fuera_de_dominio (no relacionado a salud/medicamentos/farmacias)\n"
+        "Devuelve solo la etiqueta."
+    )
+    prompt = ChatPromptTemplate.from_messages(
+        [("system", system_prompt), ("human", "{text}")]
+    )
+    structured = INTENT_ROUTER_LLM.with_structured_output(IntentOutput)
+    return prompt | structured
+
+
+def detect_intent(message: str) -> str:
+    normalized = message.strip().lower()
+    if not normalized:
+        return "fuera_de_dominio"
+    # Reglas de mayor prioridad.
+    if is_med_recommendation_query(message):
+        return "recomendacion_medicamento"
+    if is_greeting(message):
+        return "saludo"
+    if is_farewell(message):
+        return "despedida"
+    if is_history_query(message):
+        return "historial"
+    if is_pharmacy_query(message):
+        return "farmacias"
+    if is_medicine_query(message) or has_vademecum_sources(message):
+        return "consulta_medicamento"
+    if is_health_related(message):
+        return "salud_general"
+
+    # Si no hay señales claras, usa LLM para clasificar.
+    try:
+        router = get_intent_router()
+        result = router.invoke({"text": message})
+        return result.intent
+    except Exception:
+        return "fuera_de_dominio"
+
+
+HISTORY_KEYWORDS = {
+    "historial",
+    "ficha medica",
+    "ficha médica",
+    "resumen",
+    "historia clinica",
+    "historia clínica",
+    "mi ficha",
+    "mi historial",
+    "resumen de mi ficha",
+    "resumen de mi ficha medica",
+    "resumen de mi ficha médica",
+}
+
+def is_history_query(message: str) -> bool:
+    normalized = message.lower()
+    return any(keyword in normalized for keyword in HISTORY_KEYWORDS)
+
+def is_allowed_query(message: str) -> bool:
+    return (
+        is_history_query(message)
+        or is_pharmacy_query(message)
+        or is_medicine_query(message)
+        or has_vademecum_sources(message)
+        or is_health_related(message)
+    )
 
 
 def is_medicine_query(message: str) -> bool:
@@ -515,6 +960,13 @@ def is_greeting(message: str) -> bool:
     if not normalized:
         return False
     return any(keyword in normalized for keyword in GREETING_KEYWORDS)
+
+
+def is_farewell(message: str) -> bool:
+    normalized = message.lower().strip()
+    if not normalized:
+        return False
+    return any(keyword in normalized for keyword in FAREWELL_KEYWORDS)
 
 
 @lru_cache(maxsize=1)
@@ -641,12 +1093,25 @@ def format_drug_answer(scored_results: list[tuple[Any, float | None]], focus: se
         translations = {
             "hypertension": "hipertension",
             "anxiety": "ansiedad",
+            "bacterial infections": "infecciones bacterianas",
             "tablet": "tabletas",
+            "tablets": "tabletas",
+            "capsule": "capsula",
+            "capsules": "capsulas",
             "oral": "oral",
             "room temperature": "temperatura ambiente",
             "prescription": "bajo receta",
+            "category a": "categoria A",
+            "category b": "categoria B",
             "category c": "categoria C",
             "category d": "categoria D",
+            "antibiotic": "antibiotico",
+            "combination antibiotic": "antibiotico combinado",
+            "inhibits bacterial cell wall synthesis": "inhibe la sintesis de la pared celular bacteriana",
+            "nausea": "nauseas",
+            "allergic reactions": "reacciones alergicas",
+            "penicillin: reduced efficacy": "penicilina: eficacia reducida",
+            "take with food to reduce stomach upset": "tomar con alimentos para reducir el malestar estomacal",
             "blocks beta receptors": "bloquea receptores beta",
             "blocks alpha and beta receptors": "bloquea receptores alfa y beta",
             "enhances gaba activity": "potencia la actividad de GABA",
@@ -662,7 +1127,12 @@ def format_drug_answer(scored_results: list[tuple[Any, float | None]], focus: se
             "alpha-beta blocker": "bloqueador alfa-beta",
         }
         normalized = value.strip().lower()
-        return translations.get(normalized, value)
+        has_period = normalized.endswith(".")
+        normalized_key = normalized.rstrip(".")
+        translated = translations.get(normalized_key)
+        if translated is None:
+            return value
+        return f"{translated}." if has_period else translated
 
     def _translate_list(values: list[str]) -> list[str]:
         return [_translate_value(value) for value in values]
@@ -805,20 +1275,30 @@ def format_drug_answer(scored_results: list[tuple[Any, float | None]], focus: se
             f"El principio activo es {_join_unique(item['generic'])} "
             f"y pertenece al grupo terapéutico {_join_unique(item['categoria'])}."
         )
-        entries.append("\n".join([base_line, " ".join(details)]))
+        entries.append(
+            {
+                "titulo": item["titulo"],
+                "forma": presentacion,
+                "dosis": _spanish_defaults(_join_unique(item["dosis"]), "dosis no especificadas"),
+                "detalle": "\n".join([base_line, " ".join(details)]),
+            }
+        )
     if not entries:
         return NO_KNOWLEDGE_RESPONSE
     intro = (
         "Te comparto la informacion encontrada en la base csv_vademecum, redactada de forma más humana:"
     )
     cierre = "\n\nSi quieres que me enfoque en otro detalle, dime y lo ajusto."
+    # Respuesta con un único resultado (el primero).
+    cuerpo = entries[0]["detalle"]
     fuentes = []
-    for item in grouped.values():
-        fuentes.append(
-            f"- Titulo: {item['titulo']} | Categoria: {_join_unique(_translate_list(item['categoria']))} | Fuente: {item['fuente']}"
-        )
+    first_item = next(iter(grouped.values()))
+    fuentes.append(
+        f"- Titulo: {first_item['titulo']} | Categoria: "
+        f"{_join_unique(_translate_list(first_item['categoria']))} | Fuente: {first_item['fuente']}"
+    )
     fuentes_block = "\n".join(fuentes)
-    return f"{intro}\n\n" + "\n\n".join(entries) + cierre + f"\n\nFuentes:\n{fuentes_block}"
+    return f"{intro}\n\n{cuerpo}{cierre}\n\nFuentes:\n{fuentes_block}"
 
 
 def answer_from_vademecum(user_message: str) -> tuple[str, list[str]]:
@@ -829,7 +1309,7 @@ def answer_from_vademecum(user_message: str) -> tuple[str, list[str]]:
 
 
 def format_answer_with_sources(answer: str, sources: list[str]) -> str:
-    if not sources or "Fuentes consultadas" in answer:
+    if not sources or "Fuentes consultadas" in answer or "Fuentes:" in answer:
         return answer
     sources_block = "\n".join(f"- {source}" for source in sources)
     return f"{answer}\n\nFuentes consultadas:\n{sources_block}"
@@ -882,6 +1362,8 @@ def auxiliar_farmacia_agent(message: str, lat: float | None, lon: float | None) 
 
 
 def farmaceutico_agent(message: str) -> AgentResult:
+    if is_med_recommendation_query(message):
+        return {"answer": f"{format_agent_prefix('farmaceutico')}{MED_RECOMMENDATION_RESPONSE}"}
     if not is_medicine_query(message) and not has_vademecum_sources(message):
         if is_pharmacy_query(message):
             return {"handoff": "auxiliar"}
@@ -890,6 +1372,7 @@ def farmaceutico_agent(message: str) -> AgentResult:
     scored_results = select_drug_docs(message)
     focus = extract_focus(message)
     answer = format_drug_answer(scored_results, focus)
+    answer = translate_to_spanish(answer)
     sources = list(
         {
             doc.metadata.get("source")
@@ -911,6 +1394,8 @@ def farmaceutico_agent(message: str) -> AgentResult:
 
 
 def doctor_agent(message: str) -> AgentResult:
+    if not is_health_related(message):
+        return {"answer": f"{format_agent_prefix('doctor')}{NON_MEDICAL_RESPONSE}"}
     if is_pharmacy_query(message):
         return {"handoff": "auxiliar"}
     if is_medicine_query(message) or has_vademecum_sources(message):
@@ -935,7 +1420,36 @@ def route_agent(message: str) -> str:
 
 
 def run_swarm(message: str, lat: float | None, lon: float | None) -> AgentResult:
-    agent = route_agent(message)
+    intent = detect_intent(message)
+    if intent == "recomendacion_medicamento":
+        return {
+            "answer": f"{format_agent_prefix('farmaceutico')}{MED_RECOMMENDATION_RESPONSE}",
+            "agent": "farmaceutico",
+            "sources": [],
+            "qdrant_hits": [],
+        }
+    if intent == "despedida":
+        return {
+            "answer": f"{format_agent_prefix('auxiliar')}{FAREWELL_RESPONSE}",
+            "agent": "auxiliar",
+            "sources": [],
+            "qdrant_hits": [],
+        }
+    if intent == "fuera_de_dominio":
+        return {
+            "answer": f"{format_agent_prefix('doctor')}{NON_MEDICAL_RESPONSE}",
+            "agent": "doctor",
+            "sources": [],
+            "qdrant_hits": [],
+        }
+    if intent in {"historial", "farmacias", "saludo"}:
+        agent = "auxiliar"
+    elif intent == "consulta_medicamento":
+        agent = "farmaceutico"
+    elif intent == "salud_general":
+        agent = "doctor"
+    else:
+        agent = route_agent(message)
     visited: set[str] = set()
     result: AgentResult = {}
     final_agent = agent
@@ -1175,12 +1689,19 @@ def run_demo(telefono: str, lat: float, lon: float, user_message: str) -> str:
         return resultado["messages"][-1].content
 
 
+def _chunk_text(text: str, size: int = 120) -> list[str]:
+    if not text:
+        return [""]
+    return [text[i : i + size] for i in range(0, len(text), size)]
+
+
 class LocationPayload(BaseModel):
     telefono: str
     message: str
-    lat: float
-    lon: float
+    lat: float | None
+    lon: float | None
     accuracy: float | None = None
+    persist_only: bool = False
 
 
 app = FastAPI(title="Neon Persistencia + Geolocalizacion")
@@ -1203,6 +1724,9 @@ def save_location(payload: LocationPayload) -> dict[str, object]:
         config = {"configurable": {"thread_id": payload.telefono}}
         resultado = graph.invoke(entrada, config=config)
 
+    if payload.persist_only:
+        return {"status": "ok"}
+
     response: dict[str, object] = {
         "status": "ok",
         "answer": resultado["messages"][-1].content if resultado.get("messages") else NO_KNOWLEDGE_RESPONSE,
@@ -1216,6 +1740,198 @@ def save_location(payload: LocationPayload) -> dict[str, object]:
         response["farmacias_error"] = resultado.get("last_farmacias_error")
         response["farmacias_abiertas_error"] = resultado.get("last_farmacias_abiertas_error")
     return response
+
+
+@app.post("/api/location/stream")
+def save_location_stream(payload: LocationPayload) -> StreamingResponse:
+    def event_stream():
+        yield f"event: chunk\ndata: {json.dumps({'text': ''}, ensure_ascii=False)}\n\n"
+        message = payload.message
+        lat = payload.lat
+        lon = payload.lon
+        intent = detect_intent(message)
+
+        if intent == "historial":
+            with PostgresSaver.from_conn_string(DATABASE_URL) as checkpointer:
+                checkpointer.setup()
+                graph = get_swarm_graph().compile(checkpointer=checkpointer)
+                entrada = {"messages": [HumanMessage(content=message)], "lat": lat, "lon": lon}
+                config = {"configurable": {"thread_id": payload.telefono}}
+                resultado = graph.invoke(entrada, config=config)
+
+            answer = resultado["messages"][-1].content if resultado.get("messages") else NO_KNOWLEDGE_RESPONSE
+            response: dict[str, object] = {
+                "status": "ok",
+                "answer": answer,
+                "agent": resultado.get("last_agent") or "auxiliar",
+                "sources": resultado.get("last_sources", []),
+                "qdrant_hits": resultado.get("last_qdrant_hits", []),
+            }
+            for chunk in _chunk_text(answer):
+                yield f"event: chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+            yield f"event: meta\ndata: {json.dumps(response, ensure_ascii=False)}\n\n"
+            return
+
+        if intent == "fuera_de_dominio":
+            answer = f"{format_agent_prefix('doctor')}{NON_MEDICAL_RESPONSE}"
+            response: dict[str, object] = {
+                "status": "ok",
+                "answer": answer,
+                "agent": "doctor",
+                "sources": [],
+                "qdrant_hits": [],
+            }
+            for chunk in _chunk_text(answer):
+                yield f"event: chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+            yield f"event: meta\ndata: {json.dumps(response, ensure_ascii=False)}\n\n"
+            return
+
+        if intent == "recomendacion_medicamento":
+            answer = f"{format_agent_prefix('farmaceutico')}{MED_RECOMMENDATION_RESPONSE}"
+            response: dict[str, object] = {
+                "status": "ok",
+                "answer": answer,
+                "agent": "farmaceutico",
+                "sources": [],
+                "qdrant_hits": [],
+            }
+            for chunk in _chunk_text(answer):
+                yield f"event: chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+            yield f"event: meta\ndata: {json.dumps(response, ensure_ascii=False)}\n\n"
+            return
+
+        if intent == "despedida":
+            answer = f"{format_agent_prefix('auxiliar')}{FAREWELL_RESPONSE}"
+            response: dict[str, object] = {
+                "status": "ok",
+                "answer": answer,
+                "agent": "auxiliar",
+                "sources": [],
+                "qdrant_hits": [],
+            }
+            for chunk in _chunk_text(answer):
+                yield f"event: chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+            yield f"event: meta\ndata: {json.dumps(response, ensure_ascii=False)}\n\n"
+            return
+
+        if intent in {"historial", "farmacias", "saludo"}:
+            agent = "auxiliar"
+        elif intent == "consulta_medicamento":
+            agent = "farmaceutico"
+        elif intent == "salud_general":
+            agent = "doctor"
+        else:
+            agent = route_agent(message)
+        final_agent = agent
+        result: AgentResult = {}
+        visited: set[str] = set()
+
+        for _ in range(3):
+            if agent == "auxiliar":
+                result = auxiliar_farmacia_agent(message, lat, lon)
+                handoff = result.get("handoff")
+                if not handoff:
+                    final_agent = "auxiliar"
+                    break
+                if handoff in visited:
+                    final_agent = "auxiliar"
+                    break
+                visited.add(agent)
+                agent = handoff
+                final_agent = agent
+                continue
+            final_agent = agent
+            break
+
+        response: dict[str, object] = {
+            "status": "ok",
+            "answer": "",
+            "agent": final_agent,
+            "sources": [],
+            "qdrant_hits": [],
+        }
+
+        if final_agent == "farmaceutico":
+            scored_results = select_drug_docs(message)
+            focus = extract_focus(message)
+            base_answer = format_drug_answer(scored_results, focus)
+            hits = get_vademecum_hits(message)
+            sources = list(
+                {
+                    doc.metadata.get("source")
+                    for doc, score in scored_results
+                    if score is not None and score >= SCORE_THRESHOLD and doc.metadata.get("source")
+                }
+            )
+            response["sources"] = sources
+            response["qdrant_hits"] = hits
+            prefix = format_agent_prefix("farmaceutico")
+            if not sources:
+                fallback = (
+                    f"{NO_KNOWLEDGE_RESPONSE}\n\n"
+                    "Sugerencia: intenta reformular con el principio activo o el nombre generico."
+                )
+                for chunk in _chunk_text(prefix + fallback):
+                    yield f"event: chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+                response["answer"] = prefix + fallback
+                yield f"event: meta\ndata: {json.dumps(response, ensure_ascii=False)}\n\n"
+                return
+
+            translated_acc = ""
+            for chunk in _chunk_text(prefix):
+                yield f"event: chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+                translated_acc += chunk
+            for token in translate_to_spanish_stream(base_answer):
+                translated_acc += token
+                yield f"event: chunk\ndata: {json.dumps({'text': token}, ensure_ascii=False)}\n\n"
+            response["answer"] = translated_acc
+            yield f"event: meta\ndata: {json.dumps(response, ensure_ascii=False)}\n\n"
+            return
+
+        if final_agent == "doctor":
+            system_prompt = (
+                "Eres un doctor que responde consultas de salud de forma educativa.\n"
+                "Responde con lenguaje claro y comprensible.\n"
+                "No realices diagnosticos ni indiques tratamientos personalizados.\n"
+                "Niega responder recomendaciones de medicamentos y deriva a profesionales de salud.\n"
+                "Explica posibles causas de forma orientativa y aclara que la informacion\n"
+                "no sustituye la evaluacion medica profesional.\n"
+                "Recomienda explicitamente consultar a un profesional de la salud o especialista."
+            )
+            messages = [SystemMessage(content=system_prompt), HumanMessage(content=message)]
+            acc = ""
+            prefix = format_agent_prefix("doctor")
+            for chunk in _chunk_text(prefix):
+                acc += chunk
+                yield f"event: chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+            for chunk in doctor_llm.stream(messages):
+                token = getattr(chunk, "content", "") or ""
+                if token:
+                    acc += token
+                    yield f"event: chunk\ndata: {json.dumps({'text': token}, ensure_ascii=False)}\n\n"
+            response["answer"] = acc
+            yield f"event: meta\ndata: {json.dumps(response, ensure_ascii=False)}\n\n"
+            return
+
+        # Auxiliar o default: respuesta directa.
+        answer = result.get("answer") or NO_KNOWLEDGE_RESPONSE
+        answer = f"{format_agent_prefix('auxiliar')}{answer}"
+        response["answer"] = answer
+        response["agent"] = "auxiliar"
+        if result.get("farmacias"):
+            response["farmacias"] = result.get("farmacias", [])
+            response["farmacias_abiertas"] = result.get("farmacias_abiertas", [])
+            response["farmacias_error"] = result.get("farmacias_error")
+            response["farmacias_abiertas_error"] = result.get("farmacias_abiertas_error")
+        for chunk in _chunk_text(answer):
+            yield f"event: chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+        yield f"event: meta\ndata: {json.dumps(response, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 if __name__ == "__main__":

@@ -37,7 +37,7 @@ else:
 PDF_DIR: Final[Path] = _pdf_dir
 DRUG_CSV_PATH: Final[Path] = _csv_path
 COLLECTION_NAME: Final[str] = os.getenv("RAG_COLLECTION_NAME", "csv_vademecum")
-TOP_K: Final[int] = 3
+TOP_K: Final[int] = 1
 SCORE_THRESHOLD: Final[float] = 0.75
 
 REQUIRED_ENV_KEYS = ["OPENAI_API_KEY", "QDRANT_URL", "QDRANT_API_KEY"]
