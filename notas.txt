@@ -21,3 +21,8 @@ python -m pip install -r requirements.txt
 python3 scripts/rag_data_preparation.py
 
 PYTHONPATH=.:./src python -m uvicorn app.rag_farmacias_medicamentos:app --host 0.0.0.0 --port 8001 --reload
+
+
+git add .
+git commit -m "Actualización"
+git push origin main
