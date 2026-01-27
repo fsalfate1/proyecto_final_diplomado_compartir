@@ -147,6 +147,7 @@ class EstadoPersonalizado(TypedDict):
     last_farmacias_error: str | None
     last_farmacias_abiertas_error: str | None
     historial_consultas: list[dict[str, str]]
+    historial_medicamentos: list[dict[str, str]]
 
 
 def update_profile(state: EstadoPersonalizado, message: str) -> tuple[str, list[str], int, int]:
@@ -224,8 +225,6 @@ def is_health_related(message: str) -> bool:
     if any(keyword in normalized for keyword in auto_keywords):
         return False
     keywords = [
-        "farmacia",
-        "farmacias",
         "medicamento",
         "medicina",
         "farmaco",
@@ -320,7 +319,75 @@ def get_drug_name_map() -> dict[str, str]:
                     mapping[normalize_key(generic)] = name or generic
     except FileNotFoundError:
         return {}
+    # Alias comunes ES <-> EN para deteccion mas robusta.
+    alias = {
+        "morfina": "morphine",
+        "morfine": "morphine",
+        "paracetamol": "acetaminophen",
+        "acetaminofen": "acetaminophen",
+        "ibuprofeno": "ibuprofen",
+        "amoxicilina": "amoxicillin",
+        "azitromicina": "azithromycin",
+        "loratadina": "loratadine",
+        "omeprazol": "omeprazole",
+        "clonazepam": "clonazepam",
+        "sertralina": "sertraline",
+        "lisinopril": "lisinopril",
+        "losartan": "losartan",
+        "albuterol": "albuterol",
+        "salbutamol": "albuterol",
+    }
+    normalized = {normalize_key(k): normalize_key(v) for k, v in alias.items()}
+    for key, target in normalized.items():
+        if target in mapping:
+            mapping[key] = mapping[target]
     return mapping
+
+
+def extract_drug_mentions(message: str, limit: int = 5) -> list[str]:
+    normalized = normalize_key(message)
+    if not normalized:
+        return []
+    mapping = get_drug_name_map()
+    if not mapping:
+        return []
+    found: list[str] = []
+    # Match literal
+    for key, display in mapping.items():
+        if key and key in normalized:
+            if display not in found:
+                found.append(display)
+        if len(found) >= limit:
+            return found
+    # Fuzzy match over tokens and n-grams (mejor cobertura para nombres con typos).
+    stopwords = {"de", "del", "la", "el", "y", "o", "para", "por", "con", "sin"}
+    tokens = [t for t in normalized.split() if len(t) >= 3 and t not in stopwords]
+    keys = list(mapping.keys())
+
+    def _add_match(candidate: str, cutoff: float) -> None:
+        if len(found) >= limit:
+            return
+        matches = difflib.get_close_matches(candidate, keys, n=1, cutoff=cutoff)
+        if matches:
+            display = mapping.get(matches[0])
+            if display and display not in found:
+                found.append(display)
+
+    for token in tokens:
+        if len(found) >= limit:
+            break
+        _add_match(token, 0.7)
+
+    if len(found) < limit and len(tokens) >= 2:
+        for size in (2, 3, 4):
+            if len(found) >= limit:
+                break
+            for i in range(0, len(tokens) - size + 1):
+                phrase = " ".join(tokens[i : i + size])
+                _add_match(phrase, 0.74)
+                if len(found) >= limit:
+                    break
+    return found
 
 
 def clean_interests(intereses: list[str]) -> list[str]:
@@ -372,6 +439,8 @@ def summarize_history(messages: list[BaseMessage]) -> str:
 
 def classify_health_topic(message: str) -> str:
     text = normalize_symptom_text(message)
+    if "mancha" in text or "manchas" in text:
+        return "manchas en la piel"
     if "inflamacion" in text or "ganglio" in text or "ganglios" in text:
         return "inflamacion"
     if "hongo" in text or "hongos" in text:
@@ -424,8 +493,99 @@ def summarize_topics(topics: list[dict[str, str]] | list[str]) -> str:
     )
 
 
+def extract_body_zones(text: str) -> list[str]:
+    zonas = [
+        # cabeza y cara
+        "cuero cabelludo", "cabeza", "craneo", "cara", "frente", "sien", "ceja",
+        "parpado", "parpados", "pestana", "pestanas",
+        "fosa nasal", "fosas nasales", "nariz",
+        "labios mayores", "labios menores",
+        "boca", "labio", "labios",
+        "diente", "dientes", "encia", "encias", "lengua", "paladar", "menton",
+        "mandibula", "maxilar", "mejilla", "oreja", "oido", "oidos",
+        "ojo", "ojos",
+        # cuello y garganta
+        "garganta", "faringe", "laringe", "amigdala", "amigdalas",
+        "tiroides", "traquea", "nuca", "cuello",
+        # tronco anterior
+        "esternon", "costillas", "costilla", "pecho", "torax", "mama", "mamas",
+        "axilas", "axila",
+        "abdomen", "vientre", "ombligo", "estomago", "ingle",
+        # tronco posterior
+        "columna", "lumbares", "lumbar", "dorsal", "escapulas", "escapula", "espalda",
+        # miembros superiores
+        "clavicula", "hombro",
+        "brazo", "biceps", "triceps",
+        "antebrazo", "codo",
+        "muneca", "muñeca",
+        "palma", "dorso", "nudillos", "nudillo", "mano",
+        "dedo del pie", "dedos del pie",
+        "dedo", "dedos", "pulgar", "indice", "medio", "anular", "menique",
+        # pelvis y genitales
+        "cadera", "pelvis", "pubis", "perineo", "perine",
+        "testiculos", "testiculo", "escroto", "pene",
+        "clitoris", "clítoris", "vulva", "vagina",
+        "utero", "útero", "ovarios", "ovario",
+        # miembros inferiores
+        "muslo", "pierna",
+        "rotula", "rótula", "rodilla",
+        "pantorrilla", "gemelos", "gemelo",
+        "talon", "talón", "tobillo",
+        "dedo del pie", "dedos del pie",
+        "empeine", "planta", "pie",
+    ]
+    norm_text = normalize_key(text)
+    zonas_norm: list[tuple[str, str]] = []
+    for zona in zonas:
+        norm = normalize_key(zona)
+        if norm:
+            zonas_norm.append((zona, norm))
+    zonas_norm.sort(key=lambda item: len(item[1]), reverse=True)
+
+    found: list[tuple[str, str]] = []
+    for zona, norm in zonas_norm:
+        if norm in norm_text:
+            if any(norm in existing for _, existing in found):
+                continue
+            found.append((zona, norm))
+
+    tokens = [t for t in norm_text.split() if len(t) >= 4]
+    norm_map = {norm: zona for zona, norm in zonas_norm}
+    for token in tokens:
+        match = difflib.get_close_matches(token, norm_map.keys(), n=1, cutoff=0.85)
+        if match:
+            norm = match[0]
+            if any(norm in existing or existing in norm for _, existing in found):
+                continue
+            found.append((norm_map[norm], norm))
+    return [zona for zona, _ in found]
+
+
+def extract_pain_topics(text: str) -> list[str]:
+    clauses = re.split(
+        r"(?:,|;|\b(?:y tengo|y además|y ademas|y también|y tambien|además|ademas|también|tambien|pero)\b)",
+        text,
+    )
+    topics: list[str] = []
+    for clause in clauses:
+        if not clause.strip():
+            continue
+        if "dolor" in clause or "duele" in clause or "dolencia" in clause:
+            zonas = extract_body_zones(clause)
+            if zonas:
+                joined = " y ".join(zonas)
+                topics.append(f"dolor de {joined}")
+            else:
+                topics.append("dolor")
+    return topics
+
+
 def extract_health_topic_detail(message: str) -> str:
     text = normalize_symptom_text(message)
+    if "mancha" in text or "manchas" in text:
+        if "piel" in text:
+            return "manchas en la piel"
+        return "manchas"
     if "inflamacion" in text and ("ganglio" in text or "ganglios" in text):
         return "inflamación de ganglio"
     if "hongo" in text or "hongos" in text:
@@ -435,59 +595,11 @@ def extract_health_topic_detail(message: str) -> str:
             return "hongos en las uñas"
         return "hongos"
     if "dolor" in text or "duele" in text or "dolencia" in text:
-        zonas_encontradas = []
-        zonas = [
-            # cabeza y cara
-            "cabeza", "craneo", "cuero cabelludo", "cara", "frente", "sien", "ceja",
-            "ojo", "ojos", "parpado", "parpados", "pestana", "pestanas",
-            "nariz", "fosa nasal", "fosas nasales", "boca", "labio", "labios",
-            "diente", "dientes", "encia", "encias", "lengua", "paladar", "menton",
-            "mandibula", "maxilar", "mejilla", "oreja", "oido", "oidos",
-            # cuello y garganta
-            "cuello", "nuca", "garganta", "faringe", "laringe", "amigdala", "amigdalas",
-            "tiroides", "traquea",
-            # tronco anterior
-            "pecho", "torax", "esternon", "costilla", "costillas", "mama", "mamas",
-            "axila", "axilas",
-            "abdomen", "vientre", "ombligo", "estomago",
-            "ingle",
-            # tronco posterior
-            "espalda", "columna", "lumbares", "lumbar", "dorsal", "escapula", "escapulas",
-            # miembros superiores
-            "hombro", "clavicula",
-            "brazo", "biceps", "triceps",
-            "codo", "antebrazo",
-            "muneca", "muñeca",
-            "mano", "palma", "dorso", "nudillo", "nudillos",
-            "dedo", "dedos", "pulgar", "indice", "medio", "anular", "menique",
-            # pelvis y genitales
-            "cadera", "pelvis", "pubis", "perine", "perineo",
-            "pene", "testiculo", "testiculos", "escroto",
-            "vagina", "vulva", "clitoris", "clítoris", "labios mayores", "labios menores",
-            "utero", "útero", "ovario", "ovarios",
-            # miembros inferiores
-            "pierna", "muslo",
-            "rodilla", "rotula", "rótula",
-            "pantorrilla", "gemelo", "gemelos",
-            "tobillo", "talon", "talón",
-            "pie", "planta", "empeine",
-            "dedo del pie", "dedos del pie",
-        ]
-        for zona in zonas:
-            if zona in text:
-                zonas_encontradas.append(zona)
-        # Fuzzy match por palabra para faltas ortograficas generales.
-        tokens = [t for t in text.split() if len(t) >= 4]
-        for token in tokens:
-            if token in zonas:
-                continue
-            match = difflib.get_close_matches(token, zonas, n=1, cutoff=0.8)
-            if match:
-                zonas_encontradas.append(match[0])
+        zonas_encontradas = extract_body_zones(text)
         if zonas_encontradas:
             if len(zonas_encontradas) == 1:
                 return f"dolor de {zonas_encontradas[0]}"
-            joined = " y ".join(sorted(set(zonas_encontradas)))
+            joined = " y ".join(zonas_encontradas)
             return f"dolor de {joined}"
         return "dolor"
     topic = classify_health_topic(message)
@@ -495,6 +607,69 @@ def extract_health_topic_detail(message: str) -> str:
         llm_topic = rewrite_symptom_with_llm(message)
         return llm_topic
     return topic
+
+
+def extract_health_topics(message: str) -> list[str]:
+    """Extrae multiples temas de salud de un mismo mensaje."""
+    text = normalize_symptom_text(message)
+    topics: list[str] = []
+
+    if "mancha" in text or "manchas" in text:
+        zonas = extract_body_zones(text)
+        if zonas:
+            topics.append(f"manchas en la piel en {zonas[0]}")
+        elif "piel" in text:
+            topics.append("manchas en la piel")
+        else:
+            topics.append("manchas")
+
+    if "inflamacion" in text:
+        if "ganglio" in text or "ganglios" in text:
+            topics.append("inflamación de ganglio")
+        else:
+            zonas = extract_body_zones(text)
+            if zonas:
+                topics.append(f"inflamación en {zonas[0]}")
+            else:
+                topics.append("inflamación")
+
+    if "hongo" in text or "hongos" in text:
+        if "pie" in text or "pies" in text:
+            topics.append("hongos en los pies")
+        elif "uña" in text or "unas" in text or "uñas" in text:
+            topics.append("hongos en las uñas")
+        else:
+            topics.append("hongos")
+
+    if "moreton" in text or "hematoma" in text:
+        zonas = extract_body_zones(text)
+        if zonas:
+            topics.append(f"moretón en {zonas[0]}")
+        else:
+            topics.append("moretón")
+
+    if "dolor" in text or "duele" in text or "dolencia" in text:
+        pain_topics = extract_pain_topics(text)
+        if pain_topics:
+            topics.extend(pain_topics)
+        else:
+            topics.append(extract_health_topic_detail(message))
+
+    if not topics:
+        topic = classify_health_topic(message)
+        if topic == "consultas de salud":
+            llm_topic = rewrite_symptom_with_llm(message)
+            if llm_topic:
+                topics.append(llm_topic)
+        else:
+            topics.append(topic)
+
+    # dedup mantener orden
+    deduped: list[str] = []
+    for t in topics:
+        if t and t not in deduped:
+            deduped.append(t)
+    return deduped
 
 
 def rewrite_symptom_with_llm(message: str) -> str:
@@ -510,7 +685,41 @@ def rewrite_symptom_with_llm(message: str) -> str:
     text = (response.content or "").strip().lower()
     # Limpieza simple
     text = text.replace(".", "").replace(":", "").strip()
+    # Evita respuestas genericas/no sintoma
+    blocked = [
+        "no puedo",
+        "no puedo proporcionar",
+        "no puedo entregar",
+        "no puedo recomendar",
+        "consulta a un profesional",
+    ]
+    if any(b in text for b in blocked):
+        return ""
     return text[:80]
+
+
+def summarize_symptoms_with_llm(message: str) -> str:
+    """Resume sintomas en una sola frase breve."""
+    if not message.strip():
+        return ""
+    system_prompt = (
+        "Resume los sintomas en una sola frase breve en español.\n"
+        "Maximo 10 palabras. Solo sintomas, sin recomendaciones ni tratamientos.\n"
+        "Si hay varios sintomas, combinalos en una sola frase."
+    )
+    response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=message)])
+    text = (response.content or "").strip().lower()
+    text = text.replace(".", "").replace(":", "").strip()
+    blocked = [
+        "no puedo",
+        "no puedo proporcionar",
+        "no puedo entregar",
+        "no puedo recomendar",
+        "consulta a un profesional",
+    ]
+    if any(b in text for b in blocked):
+        return ""
+    return text[:120]
 
 
 def swarm_node(state: EstadoPersonalizado) -> EstadoPersonalizado:
@@ -519,23 +728,34 @@ def swarm_node(state: EstadoPersonalizado) -> EstadoPersonalizado:
         user_message = state["messages"][-1].content
     lat = state.get("lat")
     lon = state.get("lon")
+    intent = detect_intent(user_message) if user_message else "fuera_de_dominio"
 
     nombre, intereses, sesion, preguntas = update_profile(state, user_message)
     historial_consultas = list(state.get("historial_consultas", []))
+    historial_medicamentos = list(state.get("historial_medicamentos", []))
+    if historial_medicamentos and isinstance(historial_medicamentos[0], str):
+        historial_medicamentos = [
+            {"medicamento": item, "fecha": ""}
+            for item in historial_medicamentos
+            if isinstance(item, str) and item
+        ]
     if historial_consultas and isinstance(historial_consultas[0], str):
         historial_consultas = [
             {"tema": item, "fecha": ""}
             for item in historial_consultas
             if isinstance(item, str) and item
         ]
-    if user_message and (is_health_related(user_message) or detect_intent(user_message) == "salud_general"):
-        topic = extract_health_topic_detail(user_message)
-        if topic:
+    if user_message and intent == "salud_general":
+        summary = summarize_symptoms_with_llm(user_message)
+        if not summary:
+            topics = extract_health_topics(user_message)
+            summary = " y ".join(topics) if topics else ""
+        if summary:
             entry = {
-                "tema": topic,
+                "tema": summary,
                 "fecha": datetime.now().strftime("%d-%m-%Y %I:%M %p").lower(),
             }
-            if not historial_consultas or historial_consultas[-1].get("tema") != topic:
+            if not historial_consultas or historial_consultas[-1].get("tema") != summary:
                 historial_consultas.append(entry)
     wants_history = is_interest_query(user_message) or is_history_intent_llm(user_message)
     is_medicine_like = is_medicine_query(user_message) or has_vademecum_sources(user_message)
@@ -574,6 +794,7 @@ def swarm_node(state: EstadoPersonalizado) -> EstadoPersonalizado:
             "last_farmacias_error": None,
             "last_farmacias_abiertas_error": None,
             "historial_consultas": historial_consultas,
+            "historial_medicamentos": historial_medicamentos,
         }
     result = run_swarm(user_message, lat, lon)
     qdrant_hits = result.get("qdrant_hits", [])
@@ -584,6 +805,12 @@ def swarm_node(state: EstadoPersonalizado) -> EstadoPersonalizado:
                 nombre = titulo.strip()
                 if nombre and nombre not in intereses:
                     intereses.append(nombre)
+                    historial_medicamentos.append(
+                        {
+                            "medicamento": nombre,
+                            "fecha": datetime.now().strftime("%d-%m-%Y %I:%M %p").lower(),
+                        }
+                    )
     answer = result.get("answer", NO_KNOWLEDGE_RESPONSE)
     answer = f"{format_agent_prefix(result.get('agent'))}{answer}"
 
@@ -605,6 +832,7 @@ def swarm_node(state: EstadoPersonalizado) -> EstadoPersonalizado:
         "last_farmacias_error": result.get("farmacias_error"),
         "last_farmacias_abiertas_error": result.get("farmacias_abiertas_error"),
         "historial_consultas": historial_consultas,
+        "historial_medicamentos": historial_medicamentos,
     }
 
 
@@ -779,9 +1007,6 @@ MED_RECOMMENDATION_KEYWORDS = {
     "orienta",
     "orientación",
     "orientacion",
-    "medicamente",
-    "medicamento",
-    "medicamentos",
 }
 
 MED_RECOMMENDATION_RESPONSE = (
@@ -860,6 +1085,10 @@ def detect_intent(message: str) -> str:
     normalized = message.strip().lower()
     if not normalized:
         return "fuera_de_dominio"
+    # Normaliza el texto para no confundir farmacias con salud general.
+    normalized_key = normalize_key(message)
+    if "farmacia" in normalized_key or "farmacias" in normalized_key:
+        return "farmacias"
     # Reglas de mayor prioridad.
     if is_med_recommendation_query(message):
         return "recomendacion_medicamento"
@@ -1084,7 +1313,12 @@ def get_vademecum_hits(user_message: str) -> list[dict[str, object]]:
     return hits
 
 
-def format_drug_answer(scored_results: list[tuple[Any, float | None]], focus: set[str]) -> str:
+def format_drug_answer(
+    scored_results: list[tuple[Any, float | None]],
+    focus: set[str],
+    *,
+    include_intro: bool = True,
+) -> str:
     def _join_unique(values: list[str]) -> str:
         cleaned = [v for v in values if v and v != "N/A"]
         return ", ".join(sorted(set(cleaned))) if cleaned else "N/A"
@@ -1285,9 +1519,7 @@ def format_drug_answer(scored_results: list[tuple[Any, float | None]], focus: se
         )
     if not entries:
         return NO_KNOWLEDGE_RESPONSE
-    intro = (
-        "Te comparto la informacion encontrada en la base csv_vademecum, redactada de forma más humana:"
-    )
+    intro = "Te comparto la información encontrada en nuestra base de conocimiento:"
     cierre = "\n\nSi quieres que me enfoque en otro detalle, dime y lo ajusto."
     # Respuesta con un único resultado (el primero).
     cuerpo = entries[0]["detalle"]
@@ -1295,10 +1527,12 @@ def format_drug_answer(scored_results: list[tuple[Any, float | None]], focus: se
     first_item = next(iter(grouped.values()))
     fuentes.append(
         f"- Titulo: {first_item['titulo']} | Categoria: "
-        f"{_join_unique(_translate_list(first_item['categoria']))} | Fuente: {first_item['fuente']}"
+        f"{_join_unique(_translate_list(first_item['categoria']))} | Fuente: Vademécum"
     )
     fuentes_block = "\n".join(fuentes)
-    return f"{intro}\n\n{cuerpo}{cierre}\n\nFuentes:\n{fuentes_block}"
+    if include_intro:
+        return f"{intro}\n\n{cuerpo}{cierre}\n\nFuentes:\n{fuentes_block}"
+    return f"{cuerpo}{cierre}\n\nFuentes:\n{fuentes_block}"
 
 
 def answer_from_vademecum(user_message: str) -> tuple[str, list[str]]:
@@ -1369,18 +1603,26 @@ def farmaceutico_agent(message: str) -> AgentResult:
             return {"handoff": "auxiliar"}
         return {"handoff": "doctor"}
 
-    scored_results = select_drug_docs(message)
+    mentions = extract_drug_mentions(message)
     focus = extract_focus(message)
-    answer = format_drug_answer(scored_results, focus)
-    answer = translate_to_spanish(answer)
-    sources = list(
-        {
-            doc.metadata.get("source")
-            for doc, score in scored_results
-            if score is not None and score >= SCORE_THRESHOLD and doc.metadata.get("source")
-        }
-    )
-    hits = get_vademecum_hits(message)
+    answers: list[str] = []
+    sources_set: set[str] = set()
+    hits: list[dict[str, object]] = []
+
+    queries = mentions if len(mentions) > 1 else [message]
+    for query in queries:
+        scored_results = select_drug_docs(query)
+        answer = format_drug_answer(scored_results, focus, include_intro=not answers)
+        answer = translate_to_spanish(answer)
+        answers.append(answer)
+        for doc, score in scored_results:
+            if score is not None and score >= SCORE_THRESHOLD:
+                source = doc.metadata.get("source")
+                if source:
+                    sources_set.add(source)
+        hits.extend(get_vademecum_hits(query))
+
+    sources = list(sources_set)
     if not sources:
         return {
             "answer": (
@@ -1390,7 +1632,7 @@ def farmaceutico_agent(message: str) -> AgentResult:
             "sources": [],
             "qdrant_hits": hits,
         }
-    return {"answer": answer, "sources": sources, "qdrant_hits": hits}
+    return {"answer": "\n\n".join(answers), "sources": sources, "qdrant_hits": hits}
 
 
 def doctor_agent(message: str) -> AgentResult:
@@ -1403,12 +1645,12 @@ def doctor_agent(message: str) -> AgentResult:
 
     system_prompt = (
         "Eres un doctor que responde consultas de salud de forma educativa.\n"
-        "Responde con lenguaje claro y comprensible.\n"
+        "Responde con lenguaje claro y comprensible y profundiza en sintomas.\n"
+        "Estructura la respuesta con: resumen del sintoma, posibles causas generales,\n"
+        "signos de alarma y cuando consultar.\n"
         "No realices diagnosticos ni indiques tratamientos personalizados.\n"
-        "Niega responder recomendaciones de medicamentos y deriva a profesionales de salud.\n"
-        "Explica posibles causas de forma orientativa y aclara que la informacion\n"
-        "no sustituye la evaluacion medica profesional.\n"
-        "Recomienda explicitamente consultar a un profesional de la salud o especialista."
+        "No recomiendes medicamentos ni dosis; deriva a profesionales de salud.\n"
+        "Aclara que la informacion no sustituye una evaluacion medica profesional."
     )
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=message)]
     response = doctor_llm.invoke(messages)
@@ -1852,17 +2094,27 @@ def save_location_stream(payload: LocationPayload) -> StreamingResponse:
         }
 
         if final_agent == "farmaceutico":
-            scored_results = select_drug_docs(message)
+            mentions = extract_drug_mentions(message)
             focus = extract_focus(message)
-            base_answer = format_drug_answer(scored_results, focus)
-            hits = get_vademecum_hits(message)
-            sources = list(
-                {
-                    doc.metadata.get("source")
-                    for doc, score in scored_results
-                    if score is not None and score >= SCORE_THRESHOLD and doc.metadata.get("source")
-                }
-            )
+            answers: list[str] = []
+            sources_set: set[str] = set()
+            hits: list[dict[str, object]] = []
+            queries = mentions if len(mentions) > 1 else [message]
+
+            for query in queries:
+                scored_results = select_drug_docs(query)
+                base_answer = format_drug_answer(
+                    scored_results, focus, include_intro=not answers
+                )
+                answers.append(base_answer)
+                hits.extend(get_vademecum_hits(query))
+                for doc, score in scored_results:
+                    if score is not None and score >= SCORE_THRESHOLD:
+                        source = doc.metadata.get("source")
+                        if source:
+                            sources_set.add(source)
+
+            sources = list(sources_set)
             response["sources"] = sources
             response["qdrant_hits"] = hits
             prefix = format_agent_prefix("farmaceutico")
@@ -1881,7 +2133,8 @@ def save_location_stream(payload: LocationPayload) -> StreamingResponse:
             for chunk in _chunk_text(prefix):
                 yield f"event: chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
                 translated_acc += chunk
-            for token in translate_to_spanish_stream(base_answer):
+            combined = "\n\n".join(answers)
+            for token in translate_to_spanish_stream(combined):
                 translated_acc += token
                 yield f"event: chunk\ndata: {json.dumps({'text': token}, ensure_ascii=False)}\n\n"
             response["answer"] = translated_acc
@@ -1891,12 +2144,12 @@ def save_location_stream(payload: LocationPayload) -> StreamingResponse:
         if final_agent == "doctor":
             system_prompt = (
                 "Eres un doctor que responde consultas de salud de forma educativa.\n"
-                "Responde con lenguaje claro y comprensible.\n"
+                "Responde con lenguaje claro y comprensible y profundiza en sintomas.\n"
+                "Estructura la respuesta con: resumen del sintoma, posibles causas generales,\n"
+                "signos de alarma y cuando consultar.\n"
                 "No realices diagnosticos ni indiques tratamientos personalizados.\n"
-                "Niega responder recomendaciones de medicamentos y deriva a profesionales de salud.\n"
-                "Explica posibles causas de forma orientativa y aclara que la informacion\n"
-                "no sustituye la evaluacion medica profesional.\n"
-                "Recomienda explicitamente consultar a un profesional de la salud o especialista."
+                "No recomiendes medicamentos ni dosis; deriva a profesionales de salud.\n"
+                "Aclara que la informacion no sustituye una evaluacion medica profesional."
             )
             messages = [SystemMessage(content=system_prompt), HumanMessage(content=message)]
             acc = ""

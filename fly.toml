@@ -1,9 +1,9 @@
-# fly.toml app configuration file generated for proyecto-final-v2 on 2026-01-18T14:04:26-03:00
+# fly.toml app configuration file generated for proyecto-final-v2-restless-log-5239 on 2026-01-27T15:22:40-03:00
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'proyecto-final-v2'
+app = 'proyecto-final-v2-restless-log-5239'
 primary_region = 'gru'
 
 [build]

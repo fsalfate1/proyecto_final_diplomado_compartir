@@ -285,7 +285,7 @@ async function handleSend(overrideText = null) {
 
           const extras = [];
           if (data.farmacias_abiertas && data.farmacias_abiertas.length > 0) {
-            extras.push(renderPharmacies(data.farmacias_abiertas, "Farmacias Abiertas"));
+            extras.push(renderPharmacies(data.farmacias_abiertas, "Farmacias de Turnos"));
           }
           if (data.farmacias && data.farmacias.length > 0) {
             extras.push(renderPharmacies(data.farmacias, "Farmacias Cercanas"));
@@ -311,7 +311,7 @@ async function handleSend(overrideText = null) {
       updateMessageText(botId, botText);
       const extras = [];
       if (data.farmacias_abiertas && data.farmacias_abiertas.length > 0) {
-        extras.push(renderPharmacies(data.farmacias_abiertas, "Farmacias Abiertas"));
+        extras.push(renderPharmacies(data.farmacias_abiertas, "Farmacias de Turnos"));
       }
       if (data.farmacias && data.farmacias.length > 0) {
         extras.push(renderPharmacies(data.farmacias, "Farmacias Cercanas"));

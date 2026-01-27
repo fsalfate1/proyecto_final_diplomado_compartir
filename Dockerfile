@@ -15,7 +15,6 @@ COPY app ./app
 COPY static ./static
 COPY data ./data
 COPY excel ./excel
-COPY pdf ./pdf
 
 EXPOSE 8080
 

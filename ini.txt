@@ -22,3 +22,34 @@ flyctl deploy
 
 
 Hola 1:51
+
+En caso de actualizaición: 
+
+docker build -t pulso-rag-app .
+docker run --env-file .env -p 8081:8080 pulso-rag-app
+
+
+
+https://proyecto-final-v2-restless-log-5239.fly.dev
+
+--fly deploy
+
+
+
+reprocesar docker y fly.io:
+docker build -t pulso-rag-app .
+fly deploy --local-only
+
+
+reprocesar y levantar sitio en docker:
+docker build -t pulso-rag-app .
+docker run --env-file .env -p 8081:8080 pulso-rag-app
+
+
+actualizar git, rama main:
+git add .
+git commit -m "Actualización"
+git push origin main
+
+
+
