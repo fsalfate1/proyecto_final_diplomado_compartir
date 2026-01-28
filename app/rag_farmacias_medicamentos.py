@@ -11,6 +11,7 @@ from pathlib import Path
 from functools import lru_cache
 from typing import Annotated, Any, Dict, List, TypedDict, Literal
 from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -47,6 +48,7 @@ PHARMA_K = 8
 USD_TO_CLP = 900
 HISTORY_ROUTER_LLM = ChatOpenAI(model="gpt-4o-mini", temperature=0, max_tokens=50)
 INTENT_ROUTER_LLM = ChatOpenAI(model="gpt-4o-mini", temperature=0, max_tokens=80)
+LOCAL_TZ = ZoneInfo("America/Santiago")
 
 
 class IntentOutput(BaseModel):
@@ -60,6 +62,10 @@ class IntentOutput(BaseModel):
         "despedida",
         "fuera_de_dominio",
     ]
+
+
+class MedListOutput(BaseModel):
+    medicamentos: List[str]
 
 
 def translate_to_spanish(text: str) -> str:
@@ -321,6 +327,8 @@ def get_drug_name_map() -> dict[str, str]:
         return {}
     # Alias comunes ES <-> EN para deteccion mas robusta.
     alias = {
+        "aspirina": "aspirin",
+        "aspirinas": "aspirin",
         "morfina": "morphine",
         "morfine": "morphine",
         "paracetamol": "acetaminophen",
@@ -336,6 +344,14 @@ def get_drug_name_map() -> dict[str, str]:
         "losartan": "losartan",
         "albuterol": "albuterol",
         "salbutamol": "albuterol",
+        "metformina": "metformin",
+        "metformn": "metformin",
+        "dexpantenol": "dexpanthenol",
+        "dexpantenl": "dexpanthenol",
+        "dexclorfeniramina": "dexchlorpheniramine",
+        "dexclorfenirm": "dexchlorpheniramine",
+        "ketoprofeno": "ketoprofen",
+        "ketoprofren": "ketoprofen",
     }
     normalized = {normalize_key(k): normalize_key(v) for k, v in alias.items()}
     for key, target in normalized.items():
@@ -352,6 +368,46 @@ def extract_drug_mentions(message: str, limit: int = 5) -> list[str]:
     if not mapping:
         return []
     found: list[str] = []
+    # Primero, intenta extraer por segmentos (mejor para listas separadas por comas/y).
+    lowered = message.lower()
+    for filler in (
+        "informacion de",
+        "información de",
+        "informacion sobre",
+        "información sobre",
+        "info de",
+        "info sobre",
+        "datos de",
+        "datos sobre",
+    ):
+        lowered = lowered.replace(filler, "")
+    segments = re.split(r"[,\n;/]|\b(?:y|e|o)\b|&", lowered)
+
+    keys = list(mapping.keys())
+
+    def _resolve_candidate(candidate: str) -> str | None:
+        cand_norm = normalize_key(candidate)
+        if not cand_norm:
+            return None
+        if cand_norm in mapping:
+            return mapping[cand_norm]
+        for key, display in mapping.items():
+            if key and key in cand_norm:
+                return display
+        matches = difflib.get_close_matches(cand_norm, keys, n=1, cutoff=0.68)
+        if matches:
+            return mapping.get(matches[0])
+        return None
+
+    for segment in segments:
+        if len(found) >= limit:
+            break
+        resolved = _resolve_candidate(segment.strip())
+        if resolved and resolved not in found:
+            found.append(resolved)
+    if len(found) >= limit:
+        return found
+
     # Match literal
     for key, display in mapping.items():
         if key and key in normalized:
@@ -376,7 +432,7 @@ def extract_drug_mentions(message: str, limit: int = 5) -> list[str]:
     for token in tokens:
         if len(found) >= limit:
             break
-        _add_match(token, 0.7)
+        _add_match(token, 0.65)
 
     if len(found) < limit and len(tokens) >= 2:
         for size in (2, 3, 4):
@@ -384,7 +440,7 @@ def extract_drug_mentions(message: str, limit: int = 5) -> list[str]:
                 break
             for i in range(0, len(tokens) - size + 1):
                 phrase = " ".join(tokens[i : i + size])
-                _add_match(phrase, 0.74)
+                _add_match(phrase, 0.7)
                 if len(found) >= limit:
                     break
     return found
@@ -722,6 +778,89 @@ def summarize_symptoms_with_llm(message: str) -> str:
     return text[:120]
 
 
+def now_local_time_str() -> str:
+    return datetime.now(LOCAL_TZ).strftime("%d-%m-%Y %I:%M %p").lower()
+
+
+@lru_cache(maxsize=1)
+def get_med_list_extractor():
+    system_prompt = (
+        "Extrae los nombres de medicamentos mencionados en el texto.\n"
+        "Pueden estar con errores de ortografia. Devuelve SOLO una lista.\n"
+        "Si conoces el nombre generico correcto, puedes devolverlo.\n"
+        "No incluyas palabras generales como 'medicamentos' o 'informacion'."
+    )
+    prompt = ChatPromptTemplate.from_messages(
+        [("system", system_prompt), ("human", "{text}")]
+    )
+    structured = llm.with_structured_output(MedListOutput)
+    return prompt | structured
+
+
+def extract_meds_with_llm(message: str) -> list[str]:
+    if not message.strip():
+        return []
+    try:
+        response = get_med_list_extractor().invoke({"text": message})
+    except Exception:
+        return []
+    meds = response.medicamentos if response else []
+    cleaned: list[str] = []
+    blacklist = {
+        "medicamento",
+        "medicamentos",
+        "informacion",
+        "información",
+        "datos",
+        "dame",
+        "quiero",
+        "consulta",
+    }
+    for med in meds:
+        if not isinstance(med, str):
+            continue
+        item = med.strip()
+        if not item:
+            continue
+        if normalize_key(item) in blacklist:
+            continue
+        if len(item) > 60:
+            continue
+        if item not in cleaned:
+            cleaned.append(item)
+    return cleaned
+
+
+def resolve_med_queries(message: str) -> tuple[list[str], list[str]]:
+    """Resuelve lista de medicamentos desde texto y reporta no reconocidos."""
+    mentions = extract_drug_mentions(message)
+    if len(mentions) >= 2:
+        return mentions, []
+    llm_terms = extract_meds_with_llm(message)
+    if not llm_terms:
+        return mentions, []
+    mapping = get_drug_name_map()
+    keys = list(mapping.keys())
+    resolved: list[str] = []
+    unknown: list[str] = []
+    for term in llm_terms:
+        key = normalize_key(term)
+        mapped = mapping.get(key)
+        if not mapped:
+            matches = difflib.get_close_matches(key, keys, n=1, cutoff=0.78)
+            if matches:
+                mapped = mapping.get(matches[0])
+        if mapped:
+            resolved.append(mapped)
+        else:
+            unknown.append(term)
+    deduped: list[str] = []
+    for item in mentions + resolved:
+        if item and item not in deduped:
+            deduped.append(item)
+    return deduped, unknown
+
+
 def swarm_node(state: EstadoPersonalizado) -> EstadoPersonalizado:
     user_message = ""
     if state.get("messages"):
@@ -753,7 +892,7 @@ def swarm_node(state: EstadoPersonalizado) -> EstadoPersonalizado:
         if summary:
             entry = {
                 "tema": summary,
-                "fecha": datetime.now().strftime("%d-%m-%Y %I:%M %p").lower(),
+                "fecha": now_local_time_str(),
             }
             if not historial_consultas or historial_consultas[-1].get("tema") != summary:
                 historial_consultas.append(entry)
@@ -808,7 +947,7 @@ def swarm_node(state: EstadoPersonalizado) -> EstadoPersonalizado:
                     historial_medicamentos.append(
                         {
                             "medicamento": nombre,
-                            "fecha": datetime.now().strftime("%d-%m-%Y %I:%M %p").lower(),
+                            "fecha": now_local_time_str(),
                         }
                     )
     answer = result.get("answer", NO_KNOWLEDGE_RESPONSE)
@@ -1603,15 +1742,27 @@ def farmaceutico_agent(message: str) -> AgentResult:
             return {"handoff": "auxiliar"}
         return {"handoff": "doctor"}
 
-    mentions = extract_drug_mentions(message)
+    mentions, unknown_terms = resolve_med_queries(message)
     focus = extract_focus(message)
     answers: list[str] = []
     sources_set: set[str] = set()
     hits: list[dict[str, object]] = []
+    missing: list[str] = []
+    for term in unknown_terms:
+        if term and term not in missing:
+            missing.append(term)
 
-    queries = mentions if len(mentions) > 1 else [message]
+    queries = mentions if mentions else [message]
     for query in queries:
         scored_results = select_drug_docs(query)
+        has_source = any(
+            score is not None and score >= SCORE_THRESHOLD
+            for _, score in scored_results
+        )
+        if not has_source:
+            if query not in missing:
+                missing.append(query)
+            continue
         answer = format_drug_answer(scored_results, focus, include_intro=not answers)
         answer = translate_to_spanish(answer)
         answers.append(answer)
@@ -1632,7 +1783,11 @@ def farmaceutico_agent(message: str) -> AgentResult:
             "sources": [],
             "qdrant_hits": hits,
         }
-    return {"answer": "\n\n".join(answers), "sources": sources, "qdrant_hits": hits}
+    final_answer = "\n\n".join(answers)
+    if missing:
+        faltantes = ", ".join(missing)
+        final_answer = f"{final_answer}\n\nNo encontré información para: {faltantes}."
+    return {"answer": final_answer, "sources": sources, "qdrant_hits": hits}
 
 
 def doctor_agent(message: str) -> AgentResult:
@@ -2094,15 +2249,27 @@ def save_location_stream(payload: LocationPayload) -> StreamingResponse:
         }
 
         if final_agent == "farmaceutico":
-            mentions = extract_drug_mentions(message)
+            mentions, unknown_terms = resolve_med_queries(message)
             focus = extract_focus(message)
             answers: list[str] = []
             sources_set: set[str] = set()
             hits: list[dict[str, object]] = []
-            queries = mentions if len(mentions) > 1 else [message]
+            missing: list[str] = []
+            for term in unknown_terms:
+                if term and term not in missing:
+                    missing.append(term)
+            queries = mentions if mentions else [message]
 
             for query in queries:
                 scored_results = select_drug_docs(query)
+                has_source = any(
+                    score is not None and score >= SCORE_THRESHOLD
+                    for _, score in scored_results
+                )
+                if not has_source:
+                    if query not in missing:
+                        missing.append(query)
+                    continue
                 base_answer = format_drug_answer(
                     scored_results, focus, include_intro=not answers
                 )
@@ -2134,6 +2301,8 @@ def save_location_stream(payload: LocationPayload) -> StreamingResponse:
                 yield f"event: chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
                 translated_acc += chunk
             combined = "\n\n".join(answers)
+            if missing:
+                combined = f"{combined}\n\nNo encontré información para: {', '.join(missing)}."
             for token in translate_to_spanish_stream(combined):
                 translated_acc += token
                 yield f"event: chunk\ndata: {json.dumps({'text': token}, ensure_ascii=False)}\n\n"
