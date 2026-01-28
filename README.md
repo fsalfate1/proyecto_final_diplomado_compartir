@@ -30,9 +30,9 @@ graph TD
     
     subgraph "Enjambre de Agentes (Swarm)"
         Router{Router Inteligente}
-        Auxiliar[Agente Auxiliar<br/>(Geo + Contexto)]
-        Farmaceutico[Agente Farmacéutico<br/>(RAG Vademécum)]
-        Doctor[Agente Doctor<br/>(Triaje Educativo)]
+        Auxiliar["Agente Auxiliar<br/>(Geo + Contexto)"]
+        Farmaceutico["Agente Farmacéutico<br/>(RAG Vademécum)"]
+        Doctor["Agente Doctor<br/>(Triaje Educativo)"]
     end
     
     Graph --> Router
@@ -40,9 +40,9 @@ graph TD
     Router --> Farmaceutico
     Router --> Doctor
     
-    Auxiliar <-->|Haversine| JSON[(Data Local<br/>Farmacias/Turnos)]
-    Farmaceutico <-->|Vector Search| Qdrant[(Qdrant Cloud<br/>Embeddings Medicamentos)]
-    Graph <-->|Checkpointing| Postgres[(Neon DB<br/>Memoria Persistente)]
+    Auxiliar <-->|Haversine| JSON[("Data Local<br/>Farmacias/Turnos")]
+    Farmaceutico <-->|Vector Search| Qdrant[("Qdrant Cloud<br/>Embeddings Medicamentos")]
+    Graph <-->|Checkpointing| Postgres[("Neon DB<br/>Memoria Persistente")]
 ```
 
 ### 2.2 Componentes del Enjambre (The Swarm)
