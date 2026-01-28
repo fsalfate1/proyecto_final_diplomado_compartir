@@ -48,7 +48,7 @@ docker run --env-file .env -p 8081:8080 pulso-rag-app
 
 actualizar git, rama main:
 git add .
-git commit -m "Actualización 27/ene 10:15"
+git commit -m "Actualización 28 ene 7:48pm"
 git push origin main
 
 
