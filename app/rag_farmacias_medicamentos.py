@@ -2300,12 +2300,13 @@ def save_location_stream(payload: LocationPayload) -> StreamingResponse:
             for chunk in _chunk_text(prefix):
                 yield f"event: chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
                 translated_acc += chunk
-            combined = "\n\n".join(answers)
+            translated_answers = [translate_to_spanish(a) for a in answers]
+            combined = "\n\n".join(translated_answers)
             if missing:
                 combined = f"{combined}\n\nNo encontré información para: {', '.join(missing)}."
-            for token in translate_to_spanish_stream(combined):
-                translated_acc += token
-                yield f"event: chunk\ndata: {json.dumps({'text': token}, ensure_ascii=False)}\n\n"
+            for chunk in _chunk_text(combined):
+                translated_acc += chunk
+                yield f"event: chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
             response["answer"] = translated_acc
             yield f"event: meta\ndata: {json.dumps(response, ensure_ascii=False)}\n\n"
             return
